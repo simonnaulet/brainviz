@@ -1,0 +1,48 @@
+[project]
+name = "brainviz"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Simon NAULET", email = "simon.naulet85@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "matplotlib>=3.11.1",
+    "matplotlib-inline>=0.2.2",
+    "nibabel>=5.4.2",
+]
+
+[project.scripts]
+brainviz = "brainviz:main"
+
+[build-system]
+requires = ["uv_build>=0.12.9,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+# Installation PyTorch par defaut (PyPI : CPU + CUDA/NVIDIA)
+cuda = [
+    "torch>=2.14.0",
+    "torchvision>=0.29.0",
+]
+# Installation PyTorch pour GPU AMD (ROCm)
+rocm = [
+    "torch>=2.14.0",
+    "torchvision>=0.29.0",
+    "triton-rocm>=3.8.0 ; sys_platform == 'linux'",
+]
+
+[tool.uv]
+default-groups = ["cuda"]
+conflicts = [[{ group = "cuda" }, { group = "rocm" }]]
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-rocm", group = "rocm" }]
+torchvision = [{ index = "pytorch-rocm", group = "rocm" }]
+triton-rocm = [{ index = "pytorch-rocm", group = "rocm" }]
+
+[[tool.uv.index]]
+name = "pytorch-rocm"
+url = "https://download.pytorch.org/whl/rocm7.2"
+explicit = true
