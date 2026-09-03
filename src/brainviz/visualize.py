@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from matplotlib.patches import Patch
+from skimage import measure
 
 from brainviz.data.dataset import CLASS_NAMES
 
@@ -123,3 +124,110 @@ def show_sample(dataset, idx=None):
     modality = getattr(dataset, "modality", None)
     title = f"{modality} (idx={idx})" if modality else f"idx={idx}"
     return show_slice(image, label, title=title)
+
+
+def get_patient_volume(dataset, subject_id):
+    """Reconstruit le volume 3D des labels d'un patient à partir d'un BrainSliceDataset.
+
+    Empile dans l'ordre d'origine du volume les tranches du patient demandé, extraites
+    sur l'axe unique de dataset (dataset.axis). Nécessite un dataset non filtré
+    (min_foreground_ratio=0.0) : filtrer des tranches romprait la continuité du volume.
+
+    Args:
+        dataset (BrainSliceDataset): dataset exposant subject_ids et labels.
+        subject_id (str): nom du sujet (ex. "subject-1").
+
+    Returns:
+        torch.Tensor: volume (D, H, W) d'indices de classe 0..dataset.num_classes-1.
+
+    Raises:
+        ValueError: subject_id absent de dataset, ou dataset est filtré
+            (min_foreground_ratio > 0).
+    """
+    if getattr(dataset, "min_foreground_ratio", 0.0) > 0.0:
+        raise ValueError("dataset must be unfiltered (min_foreground_ratio=0.0) to reconstruct a full volume")
+    mask = dataset.subject_ids == subject_id
+    if not mask.any():
+        raise ValueError(f"subject_id {subject_id!r} not found in dataset")
+    return dataset.labels[mask]
+
+
+def _marching_cubes_meshes(volume, class_names, classes, step_size=1):
+    """Calcule le mesh marching-cubes (verts, faces, couleur) de chaque classe présente.
+
+    Args:
+        volume (np.ndarray): volume (D, H, W) d'indices de classe.
+        class_names (tuple[str, ...]): noms de classe, alignés sur les indices du volume.
+        classes (list[int] | None): indices de classe à reconstruire. Par défaut, toutes
+            les classes non nulles présentes dans volume.
+        step_size (int): pas de marching_cubes ; >1 sous-échantillonne le mesh (moins de
+            sommets/faces, rendu moins fin mais bien plus léger, utile en interactif).
+
+    Returns:
+        list[tuple[int, np.ndarray, np.ndarray, tuple]]: (class_idx, verts, faces, couleur RGBA)
+        pour chaque classe non vide.
+    """
+    n_classes = len(class_names)
+    cmap = plt.get_cmap("viridis", n_classes)
+    if classes is None:
+        classes = sorted(c for c in np.unique(volume) if c != 0)
+
+    meshes = []
+    for class_idx in classes:
+        mask = volume == class_idx
+        if not mask.any():
+            continue  # classe absente de ce volume (ex. label partiel ou prédiction manquée)
+        # level=0.5 : isosurface entre 0 (hors classe) et 1 (dans la classe) sur le masque binaire.
+        verts, faces, _, _ = measure.marching_cubes(mask.astype(np.float32), level=0.5, step_size=step_size)
+        meshes.append((class_idx, verts, faces, cmap(class_idx)))
+    return meshes
+
+
+def plot_3d_segmentation_interactive(volume, class_names=CLASS_NAMES, classes=None, opacity=0.4, step_size=2):
+    """Reconstruit et affiche en 3D (marching cubes) les surfaces de segmentation d'un volume.
+
+    Rendu avec plotly : dans un notebook Jupyter, la figure retournée s'affiche comme un
+    widget qu'on peut tourner, zoomer et déplacer à la souris.
+
+    Fonctionne aussi bien sur un label de vérité terrain (y, ex. get_patient_volume) que
+    sur une prédiction de modèle (y_hat, déjà réduite à des indices de classe via argmax) :
+    la fonction ne dépend que de la forme et des valeurs du volume, pas de sa provenance.
+
+    Args:
+        volume (torch.Tensor | np.ndarray): volume (D, H, W) d'indices de classe
+            0..len(class_names)-1 (0 = fond, exclu de la reconstruction).
+        class_names (tuple[str, ...]): noms de classe, alignés sur les indices du volume.
+        classes (list[int] | None): indices de classe à reconstruire. Par défaut, toutes
+            les classes non nulles présentes dans volume.
+        opacity (float): transparence des surfaces (0-1).
+        step_size (int): voir _marching_cubes_meshes ; 2 (défaut) allège nettement le mesh
+            (~4x moins de sommets qu'en pleine résolution) pour rester fluide dans le
+            navigateur. Monter à 1 pour plus de détail si ça reste fluide côté client.
+
+    Returns:
+        plotly.graph_objects.Figure: la figure interactive (un mesh par classe, légendé).
+    """
+    import plotly.graph_objects as go
+    from matplotlib.colors import to_hex
+
+    if isinstance(volume, torch.Tensor):
+        volume = volume.detach().cpu().numpy()
+    volume = np.asarray(volume)
+
+    fig = go.Figure()
+    for class_idx, verts, faces, color in _marching_cubes_meshes(volume, class_names, classes, step_size):
+        fig.add_trace(go.Mesh3d(
+            x=verts[:, 0], y=verts[:, 1], z=verts[:, 2],
+            i=faces[:, 0], j=faces[:, 1], k=faces[:, 2],
+            color=to_hex(color),
+            opacity=opacity,
+            name=class_names[class_idx],
+            showlegend=True,
+        ))
+
+    fig.update_layout(
+        scene=dict(aspectmode="data", xaxis_visible=False, yaxis_visible=False, zaxis_visible=False),
+        margin=dict(l=0, r=0, t=0, b=0),
+        legend=dict(title="classe"),
+    )
+    return fig
