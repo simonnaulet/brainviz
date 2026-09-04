@@ -94,6 +94,9 @@ brainviz-repslice evaluate prediction.nii.gz dataset/train/subject-1/label.img
 
 L'évaluation rapporte Dice, HD95 et ASD pour CSF, GM et WM.
 
+L'ablation des plans et des espacements `d1/d2`, ses conclusions et les commandes
+à réutiliser sont conservées dans [tta_ablation.md](tta_ablation.md).
+
 ## Ablations préparées
 
 Les configurations de `configs/experiments/` fournissent A, B, C′, C, D0, D et E.
