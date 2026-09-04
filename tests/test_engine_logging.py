@@ -2,7 +2,7 @@ import copy
 
 import torch
 
-from brainviz.training.engine import _validation_summary, restore_rng_state, rng_state
+from brainviz.training.engine import ModelEMA, _validation_summary, restore_rng_state, rng_state
 
 
 METRICS = {
@@ -47,3 +47,20 @@ def test_restore_rng_state_normalizes_torch_state_to_cpu_byte_tensor() -> None:
     restore_rng_state(state_with_wrong_dtype)
 
     assert torch.equal(torch.get_rng_state(), expected_torch_state)
+
+
+def test_foreach_ema_matches_reference_update() -> None:
+    model = torch.nn.Sequential(torch.nn.Linear(4, 3), torch.nn.BatchNorm1d(3))
+    ema = ModelEMA(model, decay=0.75)
+    before = {key: value.clone() for key, value in ema.state_dict().items()}
+    with torch.no_grad():
+        for parameter in model.parameters():
+            parameter.add_(0.5)
+        model[1].num_batches_tracked.fill_(7)
+    current = model.state_dict()
+
+    ema.update(model)
+
+    for key, value in ema.state_dict().items():
+        expected = before[key].lerp(current[key], 0.25) if value.is_floating_point() else current[key]
+        torch.testing.assert_close(value, expected)

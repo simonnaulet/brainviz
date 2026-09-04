@@ -44,14 +44,25 @@ class ModelEMA:
     def __init__(self, model: nn.Module, decay: float) -> None:
         self.decay = decay
         self.shadow = {key: value.detach().clone() for key, value in model.state_dict().items()}
+        self._refresh_keys()
+
+    def _refresh_keys(self) -> None:
+        self.floating_keys = [key for key, value in self.shadow.items() if value.is_floating_point()]
+        self.copied_keys = [key for key, value in self.shadow.items() if not value.is_floating_point()]
 
     @torch.no_grad()
     def update(self, model: nn.Module) -> None:
-        for key, value in model.state_dict().items():
-            if value.is_floating_point():
-                self.shadow[key].lerp_(value.detach(), 1 - self.decay)
-            else:
-                self.shadow[key].copy_(value)
+        state = model.state_dict()
+        torch._foreach_lerp_(
+            [self.shadow[key] for key in self.floating_keys],
+            [state[key].detach() for key in self.floating_keys],
+            1 - self.decay,
+        )
+        if self.copied_keys:
+            torch._foreach_copy_(
+                [self.shadow[key] for key in self.copied_keys],
+                [state[key].detach() for key in self.copied_keys],
+            )
 
     def model_copy(self, model: nn.Module) -> nn.Module:
         result = copy.deepcopy(model).eval()
@@ -63,6 +74,7 @@ class ModelEMA:
 
     def load_state_dict(self, state: dict[str, Tensor]) -> None:
         self.shadow = {key: value.detach().clone() for key, value in state.items()}
+        self._refresh_keys()
 
 
 def optimizer_groups(model: nn.Module, weight_decay: float) -> list[dict[str, Any]]:
@@ -234,6 +246,8 @@ def train_fold(
         device_name = "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(device_name)
     amp = bool(training.get("amp", True)) and device.type == "cuda"
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = bool(training.get("cudnn_benchmark", False))
 
     splits = load_splits(data_cfg["splits"])
     if fold == "all":
@@ -287,8 +301,11 @@ def train_fold(
 
     model = build_model(config).to(device)
     criterion = CompositeSegmentationLoss(**config.get("loss", {})).to(device)
+    fused_adamw = bool(training.get("fused_adamw", False)) and device.type == "cuda"
     optimizer = torch.optim.AdamW(
-        optimizer_groups(model, float(training["weight_decay"])), lr=float(training["learning_rate"])
+        optimizer_groups(model, float(training["weight_decay"])),
+        lr=float(training["learning_rate"]),
+        fused=fused_adamw,
     )
     epochs = 1 if smoke else int(training["epochs"])
     total_steps = epochs * iterations
@@ -316,6 +333,10 @@ def train_fold(
         model.load_state_dict(checkpoint["model"])
         ema.load_state_dict(checkpoint["ema"])
         optimizer.load_state_dict(checkpoint["optimizer"])
+        # Les anciens checkpoints ont ``fused=None`` dans leurs param groups.
+        # Restaurer explicitement le réglage courant après load_state_dict.
+        for parameter_group in optimizer.param_groups:
+            parameter_group["fused"] = fused_adamw
         scheduler.load_state_dict(checkpoint["scheduler"])
         scaler.load_state_dict(checkpoint["scaler"])
         start_epoch = int(checkpoint["epoch"]) + 1
@@ -332,11 +353,12 @@ def train_fold(
 
     run_start = time.perf_counter()
     run_start_step = global_step
+    log_every = int(training.get("log_every", 25))
     for epoch in range(start_epoch, epochs):
         epoch_start = time.perf_counter()
         sampler.set_epoch(epoch)
         model.train()
-        running: dict[str, float] = {}
+        running: dict[str, Tensor] = {}
         for iteration, batch in enumerate(loader, start=1):
             image = batch["image"].to(device, non_blocking=True)
             target = batch["label"].to(device, non_blocking=True)
@@ -357,27 +379,33 @@ def train_fold(
             ema.update(model)
             global_step += 1
             for key, value in losses.items():
-                scalar = float(value.detach())
-                running[key] = running.get(key, 0.0) + scalar
-                if writer is not None:
-                    writer.add_scalar(f"train/{key}", scalar, global_step)
-            log_every = int(training.get("log_every", 25))
+                detached = value.detach()
+                if key in running:
+                    running[key].add_(detached)
+                else:
+                    running[key] = detached.clone()
             if iteration % log_every == 0 or iteration == iterations:
+                scalars = {key: float(value.detach()) for key, value in losses.items()}
+                if writer is not None:
+                    for key, scalar in scalars.items():
+                        writer.add_scalar(f"train/{key}", scalar, global_step)
                 elapsed = time.perf_counter() - run_start
                 completed = max(1, global_step - run_start_step)
                 seconds_per_iteration = elapsed / completed
                 remaining = max(0, epochs * iterations - global_step) * seconds_per_iteration
                 print(
                     f"epoch {epoch + 1}/{epochs} iter {iteration}/{iterations} "
-                    f"loss={float(losses['loss'].detach()):.4f} {seconds_per_iteration:.3f}s/it "
+                    f"loss={scalars['loss']:.4f} {seconds_per_iteration:.3f}s/it "
                     f"ETA={remaining / 60:.1f}min",
                     flush=True,
                 )
+        running_keys = tuple(running)
+        running_means = (torch.stack([running[key] for key in running_keys]) / iterations).tolist()
         record: dict[str, Any] = {
             "epoch": epoch + 1,
             "global_step": global_step,
             "learning_rate": scheduler.get_last_lr()[0],
-            **{f"train_{key}": value / iterations for key, value in running.items()},
+            **{f"train_{key}": value for key, value in zip(running_keys, running_means, strict=True)},
         }
 
         is_3d = architecture == "unet_3d_21d"

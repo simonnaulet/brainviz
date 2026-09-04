@@ -5,7 +5,7 @@ splits = "configs/splits_iseg.json"
 margin = 8
 multiple = 16
 cache_size = 8
-num_workers = 4
+num_workers = 6
 
 [model]
 in_channels = 6
@@ -31,6 +31,8 @@ warmup_fraction = 0.05
 grad_clip = 1.0
 amp = true
 ema_decay = 0.999
+fused_adamw = true
+cudnn_benchmark = false
 seed = 12345
 log_every = 10
 output_dir = "artifacts/rep_slicemix/runs"

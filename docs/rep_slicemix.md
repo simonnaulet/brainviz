@@ -63,6 +63,8 @@ La validation axiale a lieu chaque epoch et la validation complète tous les dix
 epochs. Cette dernière suit `sampling.planes` pour les modèles axiaux A–D0 et les
 trois plans pour D. Les métriques et durées sont ajoutées à `metrics.jsonl` et
 TensorBoard ; `environment.json` conserve les versions, le GPU et le commit Git.
+Les optimisations de boucle mesurées et les options rejetées sont consignées dans
+[training_performance.md](training_performance.md).
 Une reprise continue dans le même dossier :
 
 ```bash

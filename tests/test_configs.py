@@ -15,3 +15,10 @@ def test_validation_planes_follow_experiment_presets():
     ):
         assert configured_validation_planes(load_config(root / name)) == (0,)
     assert configured_validation_planes(load_config(root / "d_triplane.toml")) == (0, 1, 2)
+
+
+def test_main_config_enables_measured_training_optimizations():
+    config = load_config("configs/rep_slicemix.toml")
+    assert config["data"]["num_workers"] == 6
+    assert config["training"]["fused_adamw"] is True
+    assert config["training"]["cudnn_benchmark"] is False
