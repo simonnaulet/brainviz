@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 import tomllib
 
-from brainviz.models import TinyUNet2D, TriPlaneRepSliceMixNet, UNet3D21D
+from brainviz.models import CompactUNet, TinyUNet2D, TriPlaneRepSliceMixNet, UNet3D21D
 
 
 def load_config(path: str | Path) -> dict:
@@ -43,6 +43,13 @@ def load_splits(path: str | Path) -> list[dict[str, list[str]]]:
 def build_model(config: dict):
     model = config["model"]
     architecture = model.get("architecture", "rep_slicemix")
+    if architecture == "compact_unet":
+        return CompactUNet(
+            in_channels=int(model.get("in_channels", 6)),
+            num_classes=int(model.get("num_classes", 4)),
+            base_channels=int(model.get("base_channels", 16)),
+            depth=int(model.get("depth", 3)),
+        )
     if architecture == "tiny_unet_2d":
         return TinyUNet2D(input_mode=model.get("input_mode", "central"), num_classes=int(model.get("num_classes", 4)))
     if architecture == "unet_3d_21d":

@@ -1,0 +1,14 @@
+extends = "../rep_slicemix.toml"
+
+[model]
+architecture = "compact_unet"
+in_channels = 6
+num_classes = 4
+base_channels = 16
+depth = 3
+
+[sampling]
+planes = [0, 1, 2]
+
+[training]
+output_dir = "artifacts/compact_unet/runs"

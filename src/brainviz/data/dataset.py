@@ -12,6 +12,30 @@ LABEL_VALUES = (0, 10, 150, 250)
 CLASS_NAMES = ("fond", "LCR", "matière grise", "matière blanche")
 
 
+def _select_modality(data, modality):
+    """Sélectionne les canaux d'entrée du modèle à partir des tranches T1+T2.
+
+    Args:
+        data (torch.Tensor): tranches (N, 2, H, W) = [T1, T2].
+        modality (str): "T1", "T2" ou "T1T2".
+
+    Returns:
+        torch.Tensor: (N, 1, H, W) pour "T1"/"T2", (N, 3, H, W) = [T1, T2, ratio] pour "T1T2".
+        Le ratio T1/T2 est calculé pixel à pixel avec un epsilon au dénominateur pour éviter
+        les divisions par zéro sur le fond, puis normalisé par sa valeur absolue max par tranche.
+    """
+    if modality == "T1":
+        return data[:, 0:1]
+    if modality == "T2":
+        return data[:, 1:2]
+
+    t1, t2 = data[:, 0:1], data[:, 1:2]
+    ratio = t1 / (t2 + 1e-6)
+    ratio_max = ratio.abs().amax(dim=(1, 2, 3), keepdim=True).clamp(min=1e-6)
+    ratio = ratio / ratio_max
+    return torch.cat([t1, t2, ratio], dim=1)
+
+
 class BrainSliceDataset(Dataset):
     """Dataset PyTorch de tranches 2D (T1 ou T2) et de leur masque de segmentation.
 
@@ -23,7 +47,8 @@ class BrainSliceDataset(Dataset):
         root_dir (str | Path): dossier d'un split (ex. "dataset/train"), contenant
             un sous-dossier par sujet.
         axis (int): axe (0, 1 ou 2) selon lequel les tranches sont extraites.
-        modality (str): "T1" ou "T2", la modalité IRM à utiliser comme entrée du modèle.
+        modality (str): "T1", "T2" ou "T1T2" (T1 + T2 + ratio T1/T2 normalisé, 3 canaux),
+            la ou les modalités IRM à utiliser comme entrée du modèle.
         scaling (str): mise à l'échelle des tranches, transmise à extract_data_slices
             ("padding" ou "bilinear").
         min_foreground_ratio (float): seuil de filtrage des tranches quasi vides, entre
@@ -44,8 +69,8 @@ class BrainSliceDataset(Dataset):
     def __init__(self, root_dir, axis=2, modality="T1", scaling="padding", min_foreground_ratio=0.0):
         if axis not in (0, 1, 2):
             raise ValueError("axis must be 0, 1 or 2")
-        if modality not in ("T1", "T2"):
-            raise ValueError("modality must be 'T1' or 'T2'")
+        if modality not in ("T1", "T2", "T1T2"):
+            raise ValueError("modality must be 'T1', 'T2' or 'T1T2'")
         if not 0.0 <= min_foreground_ratio <= 1.0:
             raise ValueError("min_foreground_ratio must be between 0 and 1")
 
@@ -57,19 +82,18 @@ class BrainSliceDataset(Dataset):
         self.scaling = scaling
         self.min_foreground_ratio = min_foreground_ratio
 
-        subject_dirs = sorted(p for p in self.root_dir.iterdir() if p.is_dir())
-        if not subject_dirs:
-            raise ValueError(f"no subject directory found in {self.root_dir}")
-
-        channel = 0 if modality == "T1" else 1
         value_to_class = {value: idx for idx, value in enumerate(LABEL_VALUES)}
 
         data_slices = []
         label_slices = []
         subject_ids = []
+        subject_dirs = sorted(p for p in self.root_dir.iterdir() if p.is_dir())
+        if not subject_dirs:
+            raise ValueError(f"no subject directory found in {self.root_dir}")
+
         for subject_dir in subject_dirs:
-            data, label = extract_data_slices(subject_dir, axes=[axis], scaling=scaling)
-            data_slices.append(data[:, channel:channel + 1])  # (N, 1, H, W)
+            data, label = extract_data_slices(subject_dir, axes=[axis], scaling=scaling)  # data: (N, 2, H, W) = T1, T2
+            data_slices.append(_select_modality(data, modality))
             label_slices.append(label)
             subject_ids.extend([subject_dir.name] * data.shape[0])
         subject_ids = np.array(subject_ids)
@@ -100,6 +124,11 @@ class BrainSliceDataset(Dataset):
     def num_classes(self):
         """int: nombre de classes de segmentation (len(LABEL_VALUES))."""
         return len(LABEL_VALUES)
+
+    @property
+    def num_channels(self):
+        """int: nombre de canaux d'entrée (1 pour "T1"/"T2", 3 pour "T1T2")."""
+        return self.data.shape[1]
 
     def __len__(self):
         """int: nombre total de tranches du dataset."""

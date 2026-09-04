@@ -1,0 +1,36 @@
+{
+  "modality": "T1T2",
+  "base_channels": 16,
+  "depth": 3,
+  "num_parameters": 99503,
+  "best_mean_dice_fg": 0.7709623177846273,
+  "dice_per_param_x1e6": 7.748131390858842,
+  "history": [
+    {
+      "epoch": 1,
+      "train_loss": 0.46618579945061356,
+      "val_loss": 0.17318016150966287,
+      "dice_per_class": {
+        "fond": 0.9982391595840454,
+        "LCR": 0.6249287128448486,
+        "mati\u00e8re grise": 0.8519609570503235,
+        "mati\u00e8re blanche": 0.5625066757202148
+      },
+      "mean_dice_fg": 0.6797987818717957,
+      "elapsed_s": 46.01467800140381
+    },
+    {
+      "epoch": 2,
+      "train_loss": 0.11476368259172887,
+      "val_loss": 0.07767491205595434,
+      "dice_per_class": {
+        "fond": 0.999138355255127,
+        "LCR": 0.8471099734306335,
+        "mati\u00e8re grise": 0.8720269799232483,
+        "mati\u00e8re blanche": 0.59375
+      },
+      "mean_dice_fg": 0.7709623177846273,
+      "elapsed_s": 31.400514364242554
+    }
+  ]
+}

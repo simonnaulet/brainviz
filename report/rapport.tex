@@ -1,0 +1,126 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[french]{babel}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+
+\title{Segmentation de tissus cérébraux sur IRM \\ \large Dataset iSeg-2017}
+\author{Hackathon SCIA 2026}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\section{Introduction}
+
+Ce projet vise à segmenter des IRM cérébrales de nourrissons en trois tissus
+d'intérêt (liquide céphalo-rachidien, matière grise, matière blanche) à
+partir du dataset public \textit{iSeg-2017}. Ce rapport présente le dataset,
+les choix de conception retenus pour préparer les données, et un problème
+identifié en cours d'exploration : la présence massive de tranches
+totalement vides dans le volume, ainsi que la solution mise en place pour
+pouvoir les exclure et en mesurer l'impact.
+
+\section{Dataset}
+
+Le dataset iSeg-2017 fournit, pour chaque sujet, deux volumes IRM 3D
+(modalités T1 et T2) ainsi qu'un volume de vérité terrain associant à chaque
+voxel l'une de quatre classes : fond, liquide céphalo-rachidien (LCR),
+matière grise et matière blanche. Les fichiers sont au format Analyze 7.5
+(paires \texttt{.hdr}/\texttt{.img}).
+
+Le dataset est scindé en deux ensembles :
+\begin{itemize}
+  \item \textbf{Entraînement} : 10 sujets, avec label de vérité terrain ;
+  \item \textbf{Test} : 13 sujets, sans label (réservés à l'évaluation
+        externe du challenge iSeg-2017).
+\end{itemize}
+
+Chaque volume 3D peut être découpé en tranches 2D selon l'un de ses trois
+axes ; les tranches obtenues selon des axes différents n'ont pas
+nécessairement la même taille, ce qui impose une mise à l'échelle commune
+avant de pouvoir les empiler dans un même tenseur.
+
+\section{Choix de conception}
+
+Le projet a été structuré autour d'un pipeline en trois étapes indépendantes
+du choix de segmentation proprement dit :
+
+\begin{itemize}
+  \item \textbf{Préparation} : les archives brutes du challenge sont
+        extraites et réorganisées en un dossier par sujet
+        (\texttt{dataset/train/subject-\emph{n}} et
+        \texttt{dataset/test/subject-\emph{n}}), séparant clairement les
+        sujets avec et sans label.
+  \item \textbf{Chargement} : les volumes sont découpés en tranches 2D selon
+        l'axe choisi, puis mis à l'échelle vers une taille carrée commune,
+        soit par remplissage (padding), soit par interpolation. Le label
+        étant catégoriel, son interpolation utilise systématiquement le mode
+        « plus proche voisin » pour ne jamais créer de classe inexistante
+        aux frontières entre tissus. Les valeurs brutes du label sont
+        ensuite remappées vers des indices de classe contigus, directement
+        exploitables par une fonction de coût standard de classification.
+  \item \textbf{Chargement PyTorch} : les tranches sont exposées via un
+        \texttt{Dataset}/\texttt{DataLoader} PyTorch classique, paramétré
+        par l'axe de coupe et la modalité (T1 ou T2) utilisée en entrée.
+\end{itemize}
+
+Un module de visualisation permet d'afficher une tranche et son label
+légendé par classe, ainsi que de reconstruire et afficher en 3D (via
+marching cubes) les surfaces de segmentation d'un volume complet, que ce
+soit à partir de la vérité terrain ou d'une prédiction de modèle.
+
+Ces choix ne présument pas encore de l'architecture de segmentation
+elle-même, qui reste à définir ; ils fixent seulement la manière dont les
+données sont rendues exploitables en amont.
+
+\section{Tranches vides : constat et solution}
+
+En explorant le dataset, nous avons constaté qu'une grande partie des
+tranches extraites sont totalement noires : ce sont les coupes prises aux
+extrémités du volume 3D, en dehors de la zone occupée par le cerveau, où
+l'image comme le label ne contiennent que du fond. Ces tranches n'apportent
+aucune information utile à l'entraînement et risquent au contraire de le
+biaiser, le modèle pouvant apprendre à prédire le fond partout pour
+minimiser trivialement l'erreur.
+
+Une mesure sur l'ensemble d'entraînement (10 sujets, découpage selon un seul
+axe, soit 2560 tranches au total) confirme l'ampleur du problème :
+\textbf{1550 tranches sur 2560 (environ 60~\%) sont entièrement dépourvues
+de tissu segmenté}, et ce de façon homogène d'un sujet à l'autre (entre 58~\%
+et 64~\% de tranches vides selon les sujets).
+
+Pour pouvoir retirer ces tranches au besoin, et plus généralement doser la
+part de tranches peu remplies conservées, nous avons ajouté au chargement
+des données un seuil configurable : une tranche n'est gardée que si la
+fraction de ses pixels appartenant à un tissu (donc hors fond) atteint ce
+seuil. Fixé à 0, ce seuil ne filtre rien ; augmenté, il élimine d'abord les
+tranches vides, puis progressivement les tranches les moins informatives.
+
+Cette mesure suit une distribution continue plutôt qu'un simple partage
+vide/non-vide : le nombre de tranches conservées chute très vite dès les
+premiers seuils, avant de se stabiliser. Sur le même ensemble
+d'entraînement :
+
+\begin{center}
+\begin{tabular}{lccccccc}
+\toprule
+Seuil minimal de tissu & 0 & 0{,}01 & 0{,}05 & 0{,}1 & 0{,}17 & 0{,}2 & 0{,}3 \\
+\midrule
+Tranches conservées & 2560 & 953 & 783 & 631 & 353 & 61 & 0 \\
+Part du total & 100~\% & 37~\% & 31~\% & 25~\% & 14~\% & 2~\% & 0~\% \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Ce mécanisme de filtrage a été expérimenté dans le notebook d'exploration,
+qui permet de visualiser cette distribution globalement et par sujet, et
+servira de base pour comparer l'effet du retrait des tranches vides (voire
+peu remplies) sur l'entraînement du modèle de segmentation.
+
+\end{document}

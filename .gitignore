@@ -19,3 +19,6 @@ nnunet/
 
 # Prétraitements et runs Rep-SliceMix
 artifacts/
+
+# Checkpoints de modèles entraînés
+*.pt
