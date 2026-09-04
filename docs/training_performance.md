@@ -71,6 +71,21 @@ Rapports bruts ignorés par Git :
 4. Le DataLoader utilise six workers persistants, avec `pin_memory` et transferts
    non bloquants déjà présents.
 5. FP16 et le `GradScaler` sont conservés.
+6. La validation axiale, uniquement informative, est exécutée toutes les cinq
+   epochs avec un batch de 32. La validation tri-plan qui sélectionne le meilleur
+   checkpoint reste exécutée toutes les dix epochs.
+
+Le batch de validation a été choisi avec une inférence tri-plan sur un sujet :
+
+| Batch validation | Temps/sujet | Pic mémoire allouée |
+|---:|---:|---:|
+| 16 | 4,925 s | 324,8 MiB |
+| **32** | **2,217 s** | 644,2 MiB |
+| 64 | 2,548 s | 1 284,2 MiB |
+
+Le batch 32 divise donc approximativement le temps de cette mesure par 2,2 sans
+pression mémoire significative sur la RTX 5070 Ti. Cette mesure est séparée du
+gain de 11,7 % de la boucle d'entraînement présenté plus haut.
 
 Les options actives sont enregistrées dans `configs/rep_slicemix.toml` :
 

@@ -36,6 +36,18 @@ La commande refuse d'écraser un preprocessing existant. Pour le reconstruire :
 brainviz-repslice preprocess --force
 ```
 
+La marge 8 reste la référence reproductible. Une évaluation fold 0 sans
+réentraînement indique que la marge 4 pourrait accélérer l'inférence avec une
+variation de Dice négligeable; elle doit être écrite dans un dossier séparé :
+
+```bash
+brainviz-repslice preprocess --input-dir dataset/train \
+  --output-dir artifacts/rep_slicemix/preprocessed-margin4 --margin 4
+```
+
+Voir [experiments.md](experiments.md) pour les chiffres et les limites. Ne pas
+utiliser `--force` sur le dossier de référence pour tester cette variante.
+
 `--unlabeled` permet de préparer explicitement un dossier destiné à l'inférence ;
 il ne doit pas être utilisé comme source d'entraînement dans le protocole retenu.
 
@@ -50,7 +62,7 @@ utilise 75 % de stacks à `d=1`, 25 % à `d=2`, 90 % de coupes cérébrales et 1
 coupes de marge. Les transformations géométriques sont communes à toutes les
 données ; les augmentations d'intensité sont propres à T1/T2 mais cohérentes entre
 les cinq coupes. Les centres candidats sont précalculés et les huit sujets du fold
-sont conservés en cache dans chacun des quatre workers. La graine d'augmentation
+sont conservés en cache dans chacun des six workers. La graine d'augmentation
 est portée par chaque requête : une reprise à une frontière d'epoch reproduit les
 mêmes données indépendamment de l'ordonnancement des workers.
 
@@ -59,10 +71,11 @@ près de GM/WM, 2 près des autres interfaces et 1 ailleurs. Le padding de colla
 est exclu. Il n'y a pas d'early stopping : `checkpoint_best_triplane.pt` est choisi
 sur le Dice volumique moyen CSF/GM/WM de l'EMA.
 
-La validation axiale a lieu chaque epoch et la validation complète tous les dix
-epochs. Cette dernière suit `sampling.planes` pour les modèles axiaux A–D0 et les
-trois plans pour D. Les métriques et durées sont ajoutées à `metrics.jsonl` et
-TensorBoard ; `environment.json` conserve les versions, le GPU et le commit Git.
+La validation axiale a lieu toutes les cinq epochs et la validation complète tous
+les dix epochs. Le batch de validation vaut 32. La validation complète suit
+`sampling.planes` pour les modèles axiaux A–D0 et les trois plans pour D. Les
+métriques et durées sont ajoutées à `metrics.jsonl` et TensorBoard ;
+`environment.json` conserve les versions, le GPU et le commit Git.
 Les optimisations de boucle mesurées et les options rejetées sont consignées dans
 [training_performance.md](training_performance.md).
 Une reprise continue dans le même dossier :
@@ -115,6 +128,14 @@ avec une vraie passe avant/arrière AdamW. Une taille non cubique `[D,H,W]` peut
 recopiée dans `patch3d.patch_size` si le volume presque complet tient en mémoire.
 La campagne recommandée est un screening sur le fold 0, puis cinq folds uniquement
 pour les finalistes, après discussion du budget de calcul.
+
+La campagne B1/B2/B3 consacrée au grand noyau reparamétrable et à la supervision
+profonde, avec ses commandes de screening et de reprise, est détaillée dans
+[architecture_ablation_round1.md](architecture_ablation_round1.md).
+La vague suivante B4, limitée à un second bloc de bottleneck, est décrite dans
+[architecture_ablation_round2.md](architecture_ablation_round2.md).
+Le test B5 qui aligne l'espacement des stacks d'entraînement sur l'inférence
+`d=1` est détaillé dans [sampling_ablation_d1.md](sampling_ablation_d1.md).
 
 Pour profiler les FLOPs du modèle déployé sur une taille donnée :
 

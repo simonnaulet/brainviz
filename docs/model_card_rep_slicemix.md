@@ -1,8 +1,7 @@
 # Model card — TriPlane Rep-SliceMix-Net
 
-> Instantané du run `fold0-20260903-233524`, relevé le 4 septembre 2026.
-> Modèle encore en entraînement : dernier epoch observé 181/200 ; meilleur
-> checkpoint observé à l'epoch 180.
+> Model card du run terminé `fold0-20260903-233524`, relevée le 4 septembre
+> 2026. Le meilleur checkpoint tri-plan est celui de l'epoch 200.
 
 ## Résumé
 
@@ -77,18 +76,22 @@ des coupes avant de produire les skips 2D.
   bias field. Les transformations géométriques sont communes aux images,
   coordonnées, masque et cible.
 
-## Résultats actuels
+## Résultats
 
-Checkpoint : `checkpoint_best_triplane.pt`, epoch **180**, 45 000 itérations.
+Checkpoint : `checkpoint_best_triplane.pt`, epoch **200**, 50 000 itérations.
 
 | Classe | Dice ↑ | HD95 ↓ | ASD ↓ |
 |---|---:|---:|---:|
-| CSF | 0,95373 | 1,00 mm | 0,1321 mm |
-| GM | 0,91803 | 1,00 mm | 0,3414 mm |
-| WM | 0,89635 | 1,00 mm | 0,3869 mm |
-| **Moyenne Dice** | **0,92270** | — | — |
+| CSF | 0,95388 | 1,00 mm | 0,1316 mm |
+| GM | 0,91830 | 1,00 mm | 0,3399 mm |
+| WM | 0,89686 | 1,00 mm | 0,3853 mm |
+| **Moyenne Dice** | **0,92302** | — | — |
 
-Dice moyen par sujet de validation : `0,92092` et `0,92448`.
+Dice moyen par sujet de validation : `0,92123` et `0,92481`.
+
+Ces métriques proviennent uniquement du fold 0 (`iseg_001`, `iseg_008`). Le
+checkpoint local est
+`artifacts/rep_slicemix/runs/fold0-20260903-233524/checkpoint_best_triplane.pt`.
 
 ## Inférence
 
@@ -111,7 +114,8 @@ latence. L'export utilise les poids EMA et fusionne les branches RepDW.
 
 ## Représentation PyTorch complète
 
-Sortie de `print(model)` pour la forme d'entraînement du checkpoint :
+Représentation issue de `print(model)` pour la forme d'entraînement B0, simplifiée
+uniquement en omettant les `ModuleList` vides introduites pour l'ablation B1 :
 
 <details>
 <summary>Déplier l'architecture PyTorch</summary>

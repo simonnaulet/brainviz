@@ -1,7 +1,7 @@
 [project]
 name = "brainviz"
 version = "0.1.0"
-description = "Add your description here"
+description = "Reproducible 2D and 2.5D brain MRI segmentation baselines for iSeg-2017"
 readme = "README.md"
 authors = [
     { name = "Simon NAULET", email = "simon.naulet85@gmail.com" }
@@ -21,7 +21,7 @@ dependencies = [
 ]
 
 [project.scripts]
-brainviz = "brainviz:main"
+brainviz = "brainviz.cli:main"
 brainviz-repslice = "brainviz.cli:main"
 
 [build-system]
