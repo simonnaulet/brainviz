@@ -29,6 +29,14 @@ La synthèse chiffrée et les décisions sont dans
 [docs/experiments.md](docs/experiments.md). La model card détaillée est dans
 [docs/model_card_rep_slicemix.md](docs/model_card_rep_slicemix.md).
 
+## Démo rapide
+
+Le notebook [notebooks/demo_repslicemix.ipynb](notebooks/demo_repslicemix.ipynb)
+charge un checkpoint existant, évalue tout le fold de validation et affiche des
+coupes T1 avec vérité terrain, prédiction, superposition et erreurs. Aucun
+entraînement n'est lancé. Le chemin du checkpoint et le mode axial/tri-plan sont
+regroupés dans sa cellule `Configuration`.
+
 ## Méthode
 
 Rep-SliceMix reçoit cinq coupes et six canaux par coupe : T1, T2, coordonnées
@@ -144,6 +152,7 @@ par Git. Chaque configuration d'ablation possède son propre `output_dir` pour
 configs/                 configurations et splits déterministes
 docs/                    protocole, model card et rapports d'ablation
 scripts/                 préparation, benchmarks et évaluation TTA
+notebooks/               exploration des données et démo du modèle entraîné
 src/brainviz/data/       preprocessing et samplers 2D/2.5D/3D
 src/brainviz/models/     Rep-SliceMix et modèles de comparaison
 src/brainviz/training/   moteur, losses et métriques
