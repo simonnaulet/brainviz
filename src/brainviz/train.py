@@ -24,27 +24,32 @@ from brainviz.models import CompactUNet
 VAL_SUBJECTS = {"subject-9", "subject-10"}
 
 
-def dice_per_class(logits, target, num_classes, eps=1e-6):
-    """Dice par classe sur un batch.
+def dice_intersection_union(logits, target, num_classes):
+    """Intersection et union par classe sur un batch, à accumuler sur tout le val set.
+
+    Le Dice par classe doit être calculé une seule fois sur l'intersection/union
+    totale du dataset de validation, pas moyenné batch par batch : sinon un batch
+    où une classe est absente à la fois de la cible et de la prédiction renvoie un
+    Dice parfait (grâce à l'epsilon), ce qui gonfle artificiellement la moyenne
+    quand une classe est souvent absente localement (ex. LCR sur certaines tranches).
 
     Args:
         logits (torch.Tensor): (B, C, H, W), logits bruts du modèle.
         target (torch.Tensor): (B, H, W), indices de classe 0..C-1.
         num_classes (int): nombre de classes C.
-        eps (float): terme de lissage au numérateur/dénominateur.
 
     Returns:
-        torch.Tensor: (C,), score Dice par classe, moyenné sur le batch.
+        tuple[torch.Tensor, torch.Tensor]: (C,) intersection et (C,) union (somme des cardinaux), par classe.
     """
     pred = logits.argmax(dim=1)
-    dices = []
+    intersections = []
+    unions = []
     for c in range(num_classes):
         pred_c = (pred == c).float()
         target_c = (target == c).float()
-        intersection = (pred_c * target_c).sum()
-        union = pred_c.sum() + target_c.sum()
-        dices.append((2 * intersection + eps) / (union + eps))
-    return torch.stack(dices)
+        intersections.append((pred_c * target_c).sum())
+        unions.append(pred_c.sum() + target_c.sum())
+    return torch.stack(intersections), torch.stack(unions)
 
 
 def split_datasets(root_dir, axis, modality, min_foreground_ratio):
@@ -105,15 +110,19 @@ def train(args):
 
         model.eval()
         val_loss = 0.0
-        dice_sum = torch.zeros(num_classes)
+        inter_sum = torch.zeros(num_classes)
+        union_sum = torch.zeros(num_classes)
         with torch.no_grad():
             for x, y in val_loader:
                 x, y = x.to(device), y.to(device)
                 logits = model(x)
                 val_loss += criterion(logits, y).item() * x.size(0)
-                dice_sum += dice_per_class(logits, y, num_classes).cpu() * x.size(0)
+                inter, union = dice_intersection_union(logits, y, num_classes)
+                inter_sum += inter.cpu()
+                union_sum += union.cpu()
         val_loss /= len(val_ds)
-        dice_per_c = (dice_sum / len(val_ds)).tolist()
+        eps = 1e-6
+        dice_per_c = ((2 * inter_sum + eps) / (union_sum + eps)).tolist()
         mean_dice_fg = sum(dice_per_c[1:]) / (num_classes - 1)  # sans le fond, comme la métrique du challenge
 
         elapsed = time.time() - t0

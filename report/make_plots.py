@@ -64,3 +64,10 @@ plot_learning_curves(
     "CompactUNet (base_channels=16) — 20 epochs — 99 503 paramètres",
     "baseline_20ep_learning_curves.png",
 )
+
+verify = load("verify_bc16_10ep/run_summary.json")
+plot_learning_curves(
+    verify,
+    "CompactUNet (base_channels=16) — 10 epochs — Dice corrigé — 99 503 paramètres",
+    "verify_bc16_10ep_learning_curves.png",
+)
