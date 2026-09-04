@@ -57,3 +57,66 @@ x, y = next(iter(loader))          # x: (B, 1, H, W), y: (B, H, W) indices de cl
 
 show_sample(loader.dataset)        # affiche une tranche + label, avec légende
 ```
+
+## Baseline nnU-Net v2 2D
+
+Préparer et préprocesser la baseline sans lancer l'entraînement :
+
+```bash
+scripts/setup_nnunet_baseline.sh
+```
+
+Le setup utilise T1 et T2, vérifie l'intégrité du dataset, planifie uniquement
+le preprocessing 2D et crée un split 5-fold au niveau sujet. Le réseau obtenu
+est un `PlainConvUNet` 2D (`patch=160x128`, `batch=41`).
+
+Une fois prêt, le fold 0 se lance explicitement avec :
+
+```bash
+scripts/train_nnunet_baseline.sh 0
+```
+
+Voir [docs/nnunet_baseline.md](docs/nnunet_baseline.md) pour la configuration,
+les splits et l'estimation de durée sur la RTX 5070 Ti.
+
+## TriPlane Rep-SliceMix-Net
+
+La seconde baseline est un réseau 2.5D compact qui traite cinq coupes T1/T2 dans
+les trois plans. Le choix 2.5D vise le **champ de vision d'un plan complet à sa
+résolution native**, et non simplement une économie face à un CNN 3D. Ce contexte
+anatomique global peut aider durant la phase isointense, lorsque le contraste local
+GM/WM est faible. Un U-Net 3D à blocs depthwise (2+1)D reste implémenté comme
+concurrent expérimental direct.
+
+Les branches structurelles sont inspirées de
+[RepVGG](https://openaccess.thecvf.com/content/CVPR2021/html/Ding_RepVGG_Making_VGG-Style_ConvNets_Great_Again_CVPR_2021_paper.html)
+et de [Diverse Branch Block](https://openaccess.thecvf.com/content/CVPR2021/html/Ding_Diverse_Branch_Block_Building_a_Convolution_as_an_Inception-Like_Unit_CVPR_2021_paper.html).
+Elles sont fusionnées en convolutions depthwise uniques pour le déploiement.
+
+Préparer les dix sujets annotés :
+
+```bash
+uv run --group dev brainviz-repslice preprocess
+```
+
+Inspecter le réseau sans entraînement :
+
+```bash
+uv run --group dev brainviz-repslice inspect
+```
+
+Faire uniquement le test d'intégration de deux itérations :
+
+```bash
+uv run --group dev brainviz-repslice train --fold 0 --smoke
+```
+
+Le vrai entraînement reste une commande explicite :
+
+```bash
+uv run --group dev brainviz-repslice train --fold 0
+```
+
+Le modèle principal possède 548 516 paramètres pendant l'entraînement et
+543 380 après fusion. Voir [docs/rep_slicemix.md](docs/rep_slicemix.md) pour les
+formats, l'inférence, les checkpoints et les ablations.

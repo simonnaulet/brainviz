@@ -1,0 +1,11 @@
+extends = "../rep_slicemix.toml"
+
+[model]
+architecture = "rep_slicemix"
+in_channels = 2
+input_indices = [0, 1]
+multi_branch = false
+film = false
+
+[sampling]
+planes = [0]

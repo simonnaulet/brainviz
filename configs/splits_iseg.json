@@ -1,0 +1,7 @@
+[
+  {"train": ["iseg_002", "iseg_003", "iseg_004", "iseg_005", "iseg_006", "iseg_007", "iseg_009", "iseg_010"], "val": ["iseg_001", "iseg_008"]},
+  {"train": ["iseg_001", "iseg_002", "iseg_003", "iseg_005", "iseg_006", "iseg_007", "iseg_008", "iseg_009"], "val": ["iseg_004", "iseg_010"]},
+  {"train": ["iseg_001", "iseg_002", "iseg_003", "iseg_004", "iseg_006", "iseg_008", "iseg_009", "iseg_010"], "val": ["iseg_005", "iseg_007"]},
+  {"train": ["iseg_001", "iseg_003", "iseg_004", "iseg_005", "iseg_006", "iseg_007", "iseg_008", "iseg_010"], "val": ["iseg_002", "iseg_009"]},
+  {"train": ["iseg_001", "iseg_002", "iseg_004", "iseg_005", "iseg_007", "iseg_008", "iseg_009", "iseg_010"], "val": ["iseg_003", "iseg_006"]}
+]

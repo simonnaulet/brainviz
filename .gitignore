@@ -12,3 +12,10 @@ wheels/
 # Données extraites / archives
 dataset/
 archives/
+
+# Artefacts nnU-Net (données converties, preprocessing, checkpoints)
+nnunet/
+.torchinductor/
+
+# Prétraitements et runs Rep-SliceMix
+artifacts/

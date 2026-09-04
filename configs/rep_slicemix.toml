@@ -1,0 +1,46 @@
+[data]
+raw_dir = "dataset/train"
+preprocessed_dir = "artifacts/rep_slicemix/preprocessed"
+splits = "configs/splits_iseg.json"
+margin = 8
+multiple = 16
+cache_size = 8
+num_workers = 4
+
+[model]
+in_channels = 6
+num_classes = 4
+widths = [24, 48, 96, 192]
+depths = [2, 2, 2, 1]
+mlp_ratio = 2
+multi_branch = true
+film = true
+down3_mode = "dense"
+
+[sampling]
+batch_size = 16
+iterations_per_epoch = 250
+d1_probability = 0.75
+brain_probability = 0.90
+
+[training]
+epochs = 200
+learning_rate = 3e-4
+weight_decay = 1e-4
+warmup_fraction = 0.05
+grad_clip = 1.0
+amp = true
+ema_decay = 0.999
+seed = 12345
+log_every = 10
+output_dir = "artifacts/rep_slicemix/runs"
+
+[validation]
+axial_every = 1
+triplane_every = 10
+batch_size = 16
+
+[loss]
+dice_weight = 0.6
+ce_weight = 0.3
+boundary_weight = 0.1

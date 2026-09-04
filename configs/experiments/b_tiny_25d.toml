@@ -1,0 +1,9 @@
+extends = "../rep_slicemix.toml"
+
+[model]
+architecture = "tiny_unet_2d"
+input_mode = "stack"
+num_classes = 4
+
+[sampling]
+planes = [0]
