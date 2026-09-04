@@ -6,6 +6,7 @@
 \usepackage[margin=2.5cm]{geometry}
 \usepackage{graphicx}
 \usepackage{booktabs}
+\usepackage{amsmath}
 \usepackage{hyperref}
 
 \title{Segmentation de tissus cérébraux sur IRM \\ \large Dataset iSeg-2017}
@@ -122,5 +123,122 @@ Ce mécanisme de filtrage a été expérimenté dans le notebook d'exploration,
 qui permet de visualiser cette distribution globalement et par sujet, et
 servira de base pour comparer l'effet du retrait des tranches vides (voire
 peu remplies) sur l'entraînement du modèle de segmentation.
+
+\section{Réduction du fond : crop à la bounding box du cerveau}
+
+Le problème des tranches vides identifié ci-dessus n'est qu'un symptôme
+d'un problème plus large : le dataset iSeg-2017 étant déjà
+\emph{skull-strippé}, le fond hors du cerveau vaut exactement 0 sur les deux
+modalités T1 et T2, sur un champ de vue nettement plus grand que le cerveau
+lui-même (volume $144 \times 192 \times 256$ par sujet). Même les tranches
+non vides contiennent donc une large marge de fond qui n'apporte aucune
+information utile au modèle.
+
+\subsection{Vérification empirique}
+
+Sur les 10 sujets d'entraînement, le masque d'intensité obtenu par simple
+seuillage ($T1 > 0$ ou $T2 > 0$) est \textbf{identique voxel à voxel} au
+masque de fond du label ($\text{label} \neq 0$), sans une seule exception.
+Un simple seuillage d'intensité suffit donc, sur ce dataset, à isoler
+exactement le cerveau, sans risque de perte de tissu réel.
+
+\subsection{Implémentation}
+
+Pour chaque sujet, une bounding box 3D est calculée à partir de l'union des
+voxels non nuls de T1 et T2, avec une marge de sécurité de 4 voxels
+(tolérance pour un sujet légèrement atypique, en particulier les sujets du
+split test qui n'ont pas de label pour vérifier la bbox directement). Comme
+chaque sujet a une bbox de taille différente, une taille de canvas commune
+à toute la cohorte est ensuite imposée --- le maximum des tailles
+individuelles, arrondi au multiple de 8 supérieur pour rester compatible
+avec la profondeur (\texttt{depth=3}) du \texttt{CompactUNet}. Sur les 10
+sujets d'entraînement, le canvas passe ainsi de $256\times256$ à
+$160\times160$, et le nombre de tranches par sujet est quasiment divisé par
+deux (les tranches entièrement vides en bord de volume étant éliminées par
+le crop).
+
+\subsection{Impact sur l'entraînement}
+
+Une comparaison contrôlée (même seed, mêmes hyperparamètres ---
+\texttt{base\_channels=16}, \texttt{depth=3}, \texttt{lr=1e-3},
+\texttt{batch\_size=16}, 10 epochs, même split validation) entre le
+pipeline actuel et l'entrée cropée donne :
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+ & sans crop & avec crop \\
+\midrule
+Canvas & $256\times256$ & $160\times160$ \\
+Tranches (train / val) & 2048 / 512 & 874 / 216 \\
+Dice moyen (fg), meilleure epoch & 0,822 (epoch 9) & 0,841 (epoch 7) \\
+Temps moyen par epoch & $\sim$110~s & $\sim$14~s \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Le crop apporte un gain de vitesse d'environ $7{,}6\times$ par epoch,
+cohérent avec la réduction du nombre de pixels traités (canvas divisé par
+$\sim$2,6, nombre de tranches par sujet divisé par $\sim$2), ainsi qu'un
+léger gain de Dice ($+0{,}019$ sur la meilleure epoch, plus net sur la
+substance blanche) --- un seul run par condition, donc pas une preuve de
+significativité statistique, mais cohérent avec l'hypothèse que retirer le
+fond trivial concentre le gradient sur les vraies frontières de tissu.
+
+\paragraph{Mise en garde sur les valeurs de \texttt{train\_loss}/\texttt{val\_loss}.}
+Ces deux quantités ne sont pas comparables entre les deux runs.
+\texttt{nn.CrossEntropyLoss()} moyenne la perte par pixel, pas par classe :
+sans crop, 95,2~\% des pixels sont du fond, contre 71,4~\% avec crop (mesuré
+via \texttt{BrainSliceDataset.foreground\_ratio}). Le fond étant la classe
+la plus facile (Dice $\approx 1{,}0000$ dès l'epoch 5 dans les deux runs),
+sa contribution quasi nulle à la perte tire d'autant plus la moyenne vers le
+bas que sa part de pixels est grande --- ce qui explique la perte plus
+faible observée sans crop (0,022 contre 0,116 à l'epoch 9), sans que le
+modèle soit pour autant meilleur. C'est un piège méthodologique classique
+des métriques moyennées par pixel sous fort déséquilibre de classe : le
+Dice foreground, moyenné par classe et non par pixel, reste la métrique
+valide pour comparer les deux runs.
+
+\subsection{Overhead du crop à l'inférence}
+
+Le gain observé à l'entraînement s'explique en bonne partie par
+l'amortissement du coût de calcul de la bbox --- effectué une seule fois, à
+la construction du dataset --- sur de nombreux batches et epochs. À
+l'inférence, un seul passage \emph{forward} par sujet, la question se pose
+différemment : l'overhead de calcul de la bbox est-il compensé par le gain
+d'un forward pass plus petit ?
+
+Une mesure directe sur un sujet (CPU, \texttt{CompactUNet} en mode
+évaluation, \texttt{torch.no\_grad()}) isole le coût partagé (chargement
+des volumes, identique dans les deux cas), l'overhead spécifique au crop
+(seuillage et calcul de bbox) et le coût du forward pass :
+
+\begin{center}
+\begin{tabular}{lr}
+\toprule
+Étape & Temps \\
+\midrule
+Chargement T1+T2 (partagé) & 0,4~ms \\
+Overhead crop --- seuillage + bbox & 27,9~ms \\
+Overhead crop --- découpe & $<$0,1~ms \\
+Forward pass sans crop (256×256, 256 tranches) & 4623~ms \\
+Forward pass avec crop (160×160, 115 tranches) & 569~ms \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+L'overhead total du crop (environ 28~ms) ne représente que 0,7~\% du gain
+apporté sur le forward pass (environ 4055~ms) : il est largement compensé.
+Le speedup net à l'inférence sur un sujet (overhead compris) est d'environ
+$7{,}75\times$, quasiment identique au $\times7{,}6$ observé par epoch à
+l'entraînement --- signe que le déséquilibre de coût entre un seuillage
+numpy vectorisé sur des voxels et un réseau de convolutions sur des pixels
+est structurel, indépendant du nombre de répétitions.
+
+Pour une inférence réelle sur le split test (sans label), il restera à
+replacer la prédiction dans le repère du volume d'origine (padding inverse
+de la bbox vers la forme d'origine) afin de l'exporter ou de l'évaluer ---
+une opération d'un coût du même ordre de grandeur négligeable que la
+découpe elle-même.
 
 \end{document}

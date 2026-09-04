@@ -71,3 +71,17 @@ plot_learning_curves(
     "CompactUNet (base_channels=16) — 10 epochs — Dice corrigé — 99 503 paramètres",
     "verify_bc16_10ep_learning_curves.png",
 )
+
+baseline_nocrop = load("baseline_nocrop_summary.json")
+plot_learning_curves(
+    baseline_nocrop,
+    "CompactUNet (base_channels=16) — 10 epochs — sans crop (256×256) — seed=0",
+    "baseline_nocrop_10ep_learning_curves.png",
+)
+
+crop = load("crop_summary.json")
+plot_learning_curves(
+    crop,
+    "CompactUNet (base_channels=16) — 10 epochs — avec crop (160×160) — seed=0",
+    "crop_10ep_learning_curves.png",
+)

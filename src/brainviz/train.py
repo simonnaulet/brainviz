@@ -52,14 +52,20 @@ def dice_intersection_union(logits, target, num_classes):
     return torch.stack(intersections), torch.stack(unions)
 
 
-def split_datasets(root_dir, axis, modality, min_foreground_ratio):
+def split_datasets(root_dir, axis, modality, min_foreground_ratio, crop, crop_margin):
     """Construit les datasets train/val en excluant VAL_SUBJECTS de train et inversement.
 
     BrainSliceDataset ne filtre pas par sujet nativement : on charge tout le split
     "train" du dataset iSeg-2017 puis on masque les tranches par subject_ids.
     """
     full = BrainSliceDataset(
-        root_dir, axis=axis, modality=modality, scaling="padding", min_foreground_ratio=min_foreground_ratio
+        root_dir,
+        axis=axis,
+        modality=modality,
+        scaling="padding",
+        min_foreground_ratio=min_foreground_ratio,
+        crop=crop,
+        crop_margin=crop_margin,
     )
     is_val = torch.tensor([sid in VAL_SUBJECTS for sid in full.subject_ids])
 
@@ -69,13 +75,19 @@ def split_datasets(root_dir, axis, modality, min_foreground_ratio):
 
 
 def train(args):
+    torch.manual_seed(args.seed)
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"device: {device}")
 
     train_ds, val_ds, num_classes, num_channels = split_datasets(
-        args.data_dir, args.axis, args.modality, args.min_foreground_ratio
+        args.data_dir, args.axis, args.modality, args.min_foreground_ratio, args.crop, args.crop_margin
     )
-    print(f"train: {len(train_ds)} tranches, val: {len(val_ds)} tranches, canaux entrée: {num_channels}")
+    image_size = tuple(train_ds.dataset.data.shape[-2:])
+    print(
+        f"train: {len(train_ds)} tranches, val: {len(val_ds)} tranches, canaux entrée: {num_channels}, "
+        f"taille image: {image_size}"
+    )
 
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
@@ -152,6 +164,10 @@ def train(args):
         "base_channels": args.base_channels,
         "depth": args.depth,
         "num_parameters": n_params,
+        "crop": args.crop,
+        "crop_margin": args.crop_margin,
+        "image_size": list(image_size),
+        "seed": args.seed,
         "best_mean_dice_fg": best_mean_dice,
         "dice_per_param_x1e6": best_mean_dice / (n_params / 1e6),
         "history": history,
@@ -170,12 +186,15 @@ def main():
     parser.add_argument("--axis", type=int, default=2, choices=(0, 1, 2))
     parser.add_argument("--modality", default="T1T2", choices=("T1", "T2", "T1T2"))
     parser.add_argument("--min-foreground-ratio", type=float, default=0.0)
+    parser.add_argument("--crop", action="store_true", help="découpe chaque volume à la bbox 3D du cerveau")
+    parser.add_argument("--crop-margin", type=int, default=4, help="marge (voxels) autour de la bbox si --crop")
     parser.add_argument("--base-channels", type=int, default=16)
     parser.add_argument("--depth", type=int, default=3)
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--num-workers", type=int, default=2)
+    parser.add_argument("--seed", type=int, default=0, help="seed torch, pour des runs comparables")
     args = parser.parse_args()
     train(args)
 

@@ -4,7 +4,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 
-from brainviz.data.loader import extract_data_slices
+from brainviz.data.loader import compute_crop_size, extract_data_slices
 
 # valeurs de label du dataset iSeg-2017 : 0=fond, 10=LCR, 150=matière grise, 250=matière blanche
 LABEL_VALUES = (0, 10, 150, 250)
@@ -55,6 +55,10 @@ class BrainSliceDataset(Dataset):
             0 et 1. Une tranche est gardée si la fraction de ses pixels de label non-fond
             (label != 0) est >= min_foreground_ratio. 0.0 (défaut) ne filtre rien ; utile
             pour comparer l'apport des tranches peu/pas segmentées à l'entraînement.
+        crop (bool): si True, découpe chaque volume à la bounding box 3D du cerveau avant
+            extraction des tranches (voir brainviz.data.loader.extract_data_slices).
+            Défaut False.
+        crop_margin (int): marge de sécurité (en voxels) autour de la bbox quand crop=True.
 
     Raises:
         ValueError: axis, modality ou min_foreground_ratio invalide, root_dir n'est pas
@@ -66,7 +70,9 @@ class BrainSliceDataset(Dataset):
         num_slices_before_filter (int): nombre de tranches avant filtrage par min_foreground_ratio.
     """
 
-    def __init__(self, root_dir, axis=2, modality="T1", scaling="padding", min_foreground_ratio=0.0):
+    def __init__(
+        self, root_dir, axis=2, modality="T1", scaling="padding", min_foreground_ratio=0.0, crop=False, crop_margin=4
+    ):
         if axis not in (0, 1, 2):
             raise ValueError("axis must be 0, 1 or 2")
         if modality not in ("T1", "T2", "T1T2"):
@@ -81,6 +87,8 @@ class BrainSliceDataset(Dataset):
         self.modality = modality
         self.scaling = scaling
         self.min_foreground_ratio = min_foreground_ratio
+        self.crop = crop
+        self.crop_margin = crop_margin
 
         value_to_class = {value: idx for idx, value in enumerate(LABEL_VALUES)}
 
@@ -91,8 +99,14 @@ class BrainSliceDataset(Dataset):
         if not subject_dirs:
             raise ValueError(f"no subject directory found in {self.root_dir}")
 
+        # chaque sujet a sa propre bbox de crop, de taille différente : il faut leur imposer
+        # une taille de canvas commune (le max de la cohorte) pour pouvoir les empiler ensuite.
+        target_size = max(compute_crop_size(d, margin=crop_margin) for d in subject_dirs) if crop else None
+
         for subject_dir in subject_dirs:
-            data, label = extract_data_slices(subject_dir, axes=[axis], scaling=scaling)  # data: (N, 2, H, W) = T1, T2
+            data, label = extract_data_slices(
+                subject_dir, axes=[axis], scaling=scaling, crop=crop, crop_margin=crop_margin, target_size=target_size
+            )  # data: (N, 2, H, W) = T1, T2
             data_slices.append(_select_modality(data, modality))
             label_slices.append(label)
             subject_ids.extend([subject_dir.name] * data.shape[0])
@@ -153,6 +167,8 @@ def get_dataloader(
     modality="T1",
     scaling="padding",
     min_foreground_ratio=0.0,
+    crop=False,
+    crop_margin=4,
     batch_size=32,
     shuffle=True,
     **dataloader_kwargs,
@@ -165,15 +181,23 @@ def get_dataloader(
         modality (str): voir BrainSliceDataset.
         scaling (str): voir BrainSliceDataset.
         min_foreground_ratio (float): voir BrainSliceDataset.
+        crop (bool): voir BrainSliceDataset.
+        crop_margin (int): voir BrainSliceDataset.
         batch_size (int): taille de batch.
         shuffle (bool): mélange les tranches à chaque epoch.
         **dataloader_kwargs: arguments supplémentaires passés à torch.utils.data.DataLoader.
 
     Returns:
         torch.utils.data.DataLoader: dataloader sur
-        BrainSliceDataset(root_dir, axis, modality, scaling, min_foreground_ratio).
+        BrainSliceDataset(root_dir, axis, modality, scaling, min_foreground_ratio, crop, crop_margin).
     """
     dataset = BrainSliceDataset(
-        root_dir, axis=axis, modality=modality, scaling=scaling, min_foreground_ratio=min_foreground_ratio
+        root_dir,
+        axis=axis,
+        modality=modality,
+        scaling=scaling,
+        min_foreground_ratio=min_foreground_ratio,
+        crop=crop,
+        crop_margin=crop_margin,
     )
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, **dataloader_kwargs)

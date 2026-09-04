@@ -108,7 +108,27 @@ L'écart varie de 0.02 à 0.18 selon l'epoch — beaucoup trop instable pour êt
 
 ## 3. Prochaines pistes testées / à tester
 
-*(section à compléter avec les runs suivants : Run 2 relancé sur 20 epochs avec le Dice corrigé pour comparaison directe, variante plus frugale `base_channels=8`, variante plus large `base_channels=24`, filtrage des tranches vides via `min_foreground_ratio`)*
+### Run 4 — crop du fond vs. sans crop, Dice corrigé, seed fixée, 10 epochs (machine Linux, CPU)
+
+**Contexte :** run repris sur une nouvelle machine (Linux, CPU uniquement, pas de GPU disponible) pour établir une comparaison contrôlée entre l'entrée actuelle (tranches paddées à 256×256, beaucoup de fond) et un crop à la bounding box 3D du cerveau (voxels T1/T2 non nuls, cf. [notebooks/test_data.ipynb](../notebooks/test_data.ipynb), section "Crop du fond"). Une seed a été ajoutée à `train.py` (`--seed`, défaut 0) pour rendre les deux runs comparables — jusqu'ici aucun run n'était seedé (cf. limite notée au Run 3).
+
+Même config pour les deux runs : `base_channels=16`, `depth=3`, `lr=1e-3`, `batch_size=16`, `modality=T1T2`, `seed=0`, split val = subject-9/subject-10.
+
+| Run | image | tranches train/val | Dice LCR | Dice S. grise | Dice S. blanche | **Dice moyen (fg)** | temps/epoch | temps total (10 ep) |
+|---|---|---|---|---|---|---|---|---|
+| sans crop (`runs/baseline_nocrop`) | 256×256 | 2048/512 | 0.890 (ep9) | 0.833 (ep9) | 0.745 (ep9) | **0.822** (ep9) | ~110s | ~18 min |
+| avec crop (`runs/crop`, `--crop`) | 160×160 | 874/216 | 0.895 (ep7) | 0.839 (ep7) | 0.789 (ep7) | **0.841** (ep7) | ~14s | ~2,4 min |
+
+**Observations :**
+- **~7,6× plus rapide par epoch** (14s vs 110s), cohérent avec la réduction de pixels traités : canvas 256²→160² (~2,6× moins de pixels/tranche) combiné à un nombre de tranches par sujet quasi divisé par 2 (le crop élimine les tranches entièrement vides en bord de volume) — au total ~85% de pixels en moins traités par epoch.
+- **Dice légèrement meilleur avec crop** (+0,019 sur le meilleur epoch, et net sur substance blanche : 0.789 vs 0.745) — un seul run par condition, donc pas une preuve de significativité, mais cohérent avec l'hypothèse : moins de fond trivial à apprendre, gradient concentré sur les vraies frontières de tissu.
+- Le crop est calculé par sujet mais la taille de canvas finale (160×160 ici) est le max de toute la cohorte, arrondi à un multiple de 8 (compatibilité `depth=3`) — voir `compute_crop_size` dans `brainviz.data.loader`.
+- **`train_loss`/`val_loss` ne sont pas comparables entre les deux runs.** `nn.CrossEntropyLoss()` moyenne par pixel, pas par classe : sans crop, 95,2% des pixels sont du fond (contre 71,4% avec crop, mesuré via `BrainSliceDataset.foreground_ratio`) ; le fond étant la classe la plus facile (Dice ≈ 1.0000 dès l'epoch 5 dans les deux runs), sa contribution quasi nulle à la loss tire d'autant plus la moyenne vers le bas que sa part de pixels est grande. La loss plus faible sans crop (0,022 vs 0,116 à l'epoch 9) reflète donc ce déséquilibre de classe, pas un modèle "meilleur" — même piège méthodologique que le biais du Dice moyenné par batch (voir correctif ci-dessus). Le Dice foreground (moyenné par classe, pas par pixel) reste la métrique valide pour comparer les deux runs.
+
+![Courbes d'apprentissage — sans crop](figures/baseline_nocrop_10ep_learning_curves.png)
+![Courbes d'apprentissage — avec crop](figures/crop_10ep_learning_curves.png)
+
+*(pistes encore à tester : Run 2 relancé sur 20 epochs avec le Dice corrigé pour comparaison directe, variante plus frugale `base_channels=8`, variante plus large `base_channels=24`, filtrage des tranches vides via `min_foreground_ratio`, combinaison crop + `min_foreground_ratio`)*
 
 ## 4. Note technique — environnement d'exécution
 
