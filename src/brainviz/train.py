@@ -18,9 +18,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import time
 from pathlib import Path
 
+import numpy as np
 import torch
 from torch import Tensor
 import torch.nn as nn
@@ -68,14 +70,20 @@ def macro_dice_from_subject_totals(
     return torch.stack(subject_dices).mean(dim=0)
 
 
-def split_datasets(root_dir, axis, modality, min_foreground_ratio):
+def split_datasets(root_dir, axis, modality, min_foreground_ratio, crop, crop_margin):
     """Construit les datasets train/val en excluant VAL_SUBJECTS de train et inversement.
 
     BrainSliceDataset ne filtre pas par sujet nativement : on charge tout le split
     "train" du dataset iSeg-2017 puis on masque les tranches par subject_ids.
     """
     full = BrainSliceDataset(
-        root_dir, axis=axis, modality=modality, scaling="padding", min_foreground_ratio=min_foreground_ratio
+        root_dir,
+        axis=axis,
+        modality=modality,
+        scaling="padding",
+        min_foreground_ratio=min_foreground_ratio,
+        crop=crop,
+        crop_margin=crop_margin,
     )
     train_indices = [
         index
@@ -104,16 +112,28 @@ def split_datasets(root_dir, axis, modality, min_foreground_ratio):
 
 
 def train(args: argparse.Namespace) -> None:
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"device: {device}")
 
     train_ds, validation_datasets, num_classes, num_channels = split_datasets(
-        args.data_dir, args.axis, args.modality, args.min_foreground_ratio
+        args.data_dir,
+        args.axis,
+        args.modality,
+        args.min_foreground_ratio,
+        args.crop,
+        args.crop_margin,
     )
     validation_size = sum(len(dataset) for dataset in validation_datasets)
+    image_size = tuple(train_ds.dataset.data.shape[-2:])
     print(
         f"train: {len(train_ds)} tranches, val: {validation_size} tranches, "
-        f"canaux entrée: {num_channels}"
+        f"canaux entrée: {num_channels}, taille image: {image_size}"
     )
 
     train_loader = DataLoader(
@@ -133,7 +153,10 @@ def train(args: argparse.Namespace) -> None:
     ]
 
     model = CompactUNet(
-        in_channels=num_channels, num_classes=num_classes, base_channels=args.base_channels, depth=args.depth
+        in_channels=num_channels,
+        num_classes=num_classes,
+        base_channels=args.base_channels,
+        depth=args.depth,
     ).to(device)
     n_params = model.num_parameters()
     print(f"modèle: {n_params:,} paramètres")
@@ -210,14 +233,21 @@ def train(args: argparse.Namespace) -> None:
         "base_channels": args.base_channels,
         "depth": args.depth,
         "num_parameters": n_params,
+        "crop": args.crop,
+        "crop_margin": args.crop_margin,
+        "image_size": list(image_size),
+        "seed": args.seed,
         "best_mean_dice_fg": best_mean_dice,
         "dice_per_param_x1e6": best_mean_dice / (n_params / 1e6),
         "history": history,
     }
-    with open(out_dir / "run_summary.json", "w") as f:
-        json.dump(summary, f, indent=2)
+    with (out_dir / "run_summary.json").open("w", encoding="utf-8") as stream:
+        json.dump(summary, stream, indent=2)
 
-    print(f"\nmeilleur mean_dice_fg: {best_mean_dice:.4f} | dice/1M params: {summary['dice_per_param_x1e6']:.4f}")
+    print(
+        f"\nmeilleur mean_dice_fg: {best_mean_dice:.4f} "
+        f"| dice/1M params: {summary['dice_per_param_x1e6']:.4f}"
+    )
     print(f"résumé sauvegardé dans {out_dir / 'run_summary.json'}")
 
 
@@ -226,17 +256,37 @@ def main() -> None:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--data-dir", default="dataset/train", help="dossier du split d'entraînement")
-    parser.add_argument("--out-dir", default="runs/compact_unet", help="dossier de sortie (poids + logs)")
+    parser.add_argument(
+        "--data-dir",
+        default="dataset/train",
+        help="dossier du split d'entraînement",
+    )
+    parser.add_argument(
+        "--out-dir",
+        default="runs/compact_unet",
+        help="dossier de sortie (poids + logs)",
+    )
     parser.add_argument("--axis", type=int, default=2, choices=(0, 1, 2))
     parser.add_argument("--modality", default="T1T2", choices=("T1", "T2", "T1T2"))
     parser.add_argument("--min-foreground-ratio", type=float, default=0.0)
+    parser.add_argument(
+        "--crop",
+        action="store_true",
+        help="découpe chaque volume à la bbox 3D du cerveau",
+    )
+    parser.add_argument(
+        "--crop-margin",
+        type=int,
+        default=4,
+        help="marge (voxels) autour de la bbox si --crop",
+    )
     parser.add_argument("--base-channels", type=int, default=16)
     parser.add_argument("--depth", type=int, default=3)
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--num-workers", type=int, default=2)
+    parser.add_argument("--seed", type=int, default=0, help="seed torch, pour des runs comparables")
     args = parser.parse_args()
     train(args)
 

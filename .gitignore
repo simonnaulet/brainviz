@@ -23,5 +23,13 @@ artifacts/
 # Checkpoints de modèles entraînés
 *.pt
 
-# Sorties du pipeline Compact U-Net historique
+# Sorties brutes des runs d'entraînement (poids + logs) ; les résumés utiles
+# sont recopiés à la main dans report/ (voir report/*_summary.json)
 runs/
+
+# Sorties régénérables du rapport historique
+report/figures/
+report/*.aux
+report/*.log
+report/*.out
+report/*.pdf

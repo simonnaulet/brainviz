@@ -1,10 +1,13 @@
+from __future__ import annotations
+
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 
-from brainviz.data.loader import extract_data_slices
+from brainviz.data.loader import compute_crop_size, extract_data_slices
 
 # valeurs de label du dataset iSeg-2017 : 0=fond, 10=LCR, 150=matière grise, 250=matière blanche
 LABEL_VALUES = (0, 10, 150, 250)
@@ -12,7 +15,7 @@ LABEL_VALUES = (0, 10, 150, 250)
 CLASS_NAMES = ("fond", "LCR", "matière grise", "matière blanche")
 
 
-def _select_modality(data, modality):
+def _select_modality(data: torch.Tensor, modality: str) -> torch.Tensor:
     """Sélectionne les canaux d'entrée du modèle à partir des tranches T1+T2.
 
     Args:
@@ -55,6 +58,10 @@ class BrainSliceDataset(Dataset):
             0 et 1. Une tranche est gardée si la fraction de ses pixels de label non-fond
             (label != 0) est >= min_foreground_ratio. 0.0 (défaut) ne filtre rien ; utile
             pour comparer l'apport des tranches peu/pas segmentées à l'entraînement.
+        crop (bool): si True, découpe chaque volume à la bounding box 3D du cerveau avant
+            extraction des tranches (voir brainviz.data.loader.extract_data_slices).
+            Défaut False.
+        crop_margin (int): marge de sécurité (en voxels) autour de la bbox quand crop=True.
 
     Raises:
         ValueError: axis, modality ou min_foreground_ratio invalide, root_dir n'est pas
@@ -66,13 +73,24 @@ class BrainSliceDataset(Dataset):
         num_slices_before_filter (int): nombre de tranches avant filtrage par min_foreground_ratio.
     """
 
-    def __init__(self, root_dir, axis=2, modality="T1", scaling="padding", min_foreground_ratio=0.0):
+    def __init__(
+        self,
+        root_dir: str | Path,
+        axis: int = 2,
+        modality: str = "T1",
+        scaling: str = "padding",
+        min_foreground_ratio: float = 0.0,
+        crop: bool = False,
+        crop_margin: int = 4,
+    ) -> None:
         if axis not in (0, 1, 2):
             raise ValueError("axis must be 0, 1 or 2")
         if modality not in ("T1", "T2", "T1T2"):
             raise ValueError("modality must be 'T1', 'T2' or 'T1T2'")
         if not 0.0 <= min_foreground_ratio <= 1.0:
             raise ValueError("min_foreground_ratio must be between 0 and 1")
+        if crop_margin < 0:
+            raise ValueError("crop_margin must be non-negative")
 
         self.root_dir = Path(root_dir)
         if not self.root_dir.is_dir():
@@ -81,6 +99,8 @@ class BrainSliceDataset(Dataset):
         self.modality = modality
         self.scaling = scaling
         self.min_foreground_ratio = min_foreground_ratio
+        self.crop = crop
+        self.crop_margin = crop_margin
 
         value_to_class = {value: idx for idx, value in enumerate(LABEL_VALUES)}
 
@@ -91,8 +111,19 @@ class BrainSliceDataset(Dataset):
         if not subject_dirs:
             raise ValueError(f"no subject directory found in {self.root_dir}")
 
+        # chaque sujet a sa propre bbox de crop, de taille différente : il faut leur imposer
+        # une taille de canvas commune (le max de la cohorte) pour pouvoir les empiler ensuite.
+        target_size = max(compute_crop_size(d, margin=crop_margin) for d in subject_dirs) if crop else None
+
         for subject_dir in subject_dirs:
-            data, label = extract_data_slices(subject_dir, axes=[axis], scaling=scaling)  # data: (N, 2, H, W) = T1, T2
+            data, label = extract_data_slices(
+                subject_dir,
+                axes=(axis,),
+                scaling=scaling,
+                crop=crop,
+                crop_margin=crop_margin,
+                target_size=target_size,
+            )  # data: (N, 2, H, W) = T1, T2
             data_slices.append(_select_modality(data, modality))
             label_slices.append(label)
             subject_ids.extend([subject_dir.name] * data.shape[0])
@@ -102,6 +133,10 @@ class BrainSliceDataset(Dataset):
         labels = torch.cat(label_slices, dim=0).squeeze(1).long()  # (N, H, W), valeurs brutes
         # on remplace les valeurs brutes du label par des indices de classe contigus 0..C-1
         # pour être directement utilisable avec nn.CrossEntropyLoss.
+        observed_values = set(torch.unique(labels).tolist())
+        unknown_values = observed_values.difference(value_to_class)
+        if unknown_values:
+            raise ValueError(f"unknown label values: {sorted(unknown_values)}")
         class_labels = torch.zeros_like(labels)
         for value, idx in value_to_class.items():
             class_labels[labels == value] = idx
@@ -115,26 +150,28 @@ class BrainSliceDataset(Dataset):
             data, class_labels = data[keep], class_labels[keep]
             subject_ids = subject_ids[keep.numpy()]
             self.foreground_ratio = self.foreground_ratio[keep]
+        if not len(data):
+            raise ValueError("foreground filtering removed every slice")
 
         self.data = data
         self.labels = class_labels
         self.subject_ids = subject_ids
 
     @property
-    def num_classes(self):
+    def num_classes(self) -> int:
         """int: nombre de classes de segmentation (len(LABEL_VALUES))."""
         return len(LABEL_VALUES)
 
     @property
-    def num_channels(self):
+    def num_channels(self) -> int:
         """int: nombre de canaux d'entrée (1 pour "T1"/"T2", 3 pour "T1T2")."""
         return self.data.shape[1]
 
-    def __len__(self):
+    def __len__(self) -> int:
         """int: nombre total de tranches du dataset."""
         return self.data.shape[0]
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Renvoie une tranche et son label.
 
         Args:
@@ -148,15 +185,17 @@ class BrainSliceDataset(Dataset):
 
 
 def get_dataloader(
-    root_dir,
-    axis=2,
-    modality="T1",
-    scaling="padding",
-    min_foreground_ratio=0.0,
-    batch_size=32,
-    shuffle=True,
-    **dataloader_kwargs,
-):
+    root_dir: str | Path,
+    axis: int = 2,
+    modality: str = "T1",
+    scaling: str = "padding",
+    min_foreground_ratio: float = 0.0,
+    crop: bool = False,
+    crop_margin: int = 4,
+    batch_size: int = 32,
+    shuffle: bool = True,
+    **dataloader_kwargs: Any,
+) -> DataLoader:
     """Construit un DataLoader PyTorch sur un BrainSliceDataset.
 
     Args:
@@ -165,15 +204,23 @@ def get_dataloader(
         modality (str): voir BrainSliceDataset.
         scaling (str): voir BrainSliceDataset.
         min_foreground_ratio (float): voir BrainSliceDataset.
+        crop (bool): voir BrainSliceDataset.
+        crop_margin (int): voir BrainSliceDataset.
         batch_size (int): taille de batch.
         shuffle (bool): mélange les tranches à chaque epoch.
         **dataloader_kwargs: arguments supplémentaires passés à torch.utils.data.DataLoader.
 
     Returns:
         torch.utils.data.DataLoader: dataloader sur
-        BrainSliceDataset(root_dir, axis, modality, scaling, min_foreground_ratio).
+        BrainSliceDataset(root_dir, axis, modality, scaling, min_foreground_ratio, crop, crop_margin).
     """
     dataset = BrainSliceDataset(
-        root_dir, axis=axis, modality=modality, scaling=scaling, min_foreground_ratio=min_foreground_ratio
+        root_dir,
+        axis=axis,
+        modality=modality,
+        scaling=scaling,
+        min_foreground_ratio=min_foreground_ratio,
+        crop=crop,
+        crop_margin=crop_margin,
     )
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, **dataloader_kwargs)

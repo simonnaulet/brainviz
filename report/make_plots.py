@@ -16,12 +16,12 @@ CLASS_COLORS = {
 }
 
 
-def load(name):
-    with open(REPORT_DIR / name) as f:
-        return json.load(f)
+def load(name: str) -> dict:
+    with (REPORT_DIR / name).open(encoding="utf-8") as stream:
+        return json.load(stream)
 
 
-def plot_learning_curves(summary, title, out_name):
+def plot_learning_curves(summary: dict, title: str, out_name: str) -> None:
     history = summary["history"]
     epochs = [h["epoch"] for h in history]
     train_loss = [h["train_loss"] for h in history]
@@ -58,9 +58,35 @@ def plot_learning_curves(summary, title, out_name):
     print(f"saved {out_name}")
 
 
-baseline = load("baseline_bc16_summary.json")
-plot_learning_curves(
-    baseline,
-    "CompactUNet (base_channels=16) — 20 epochs — 99 503 paramètres",
-    "baseline_20ep_learning_curves.png",
-)
+def main() -> None:
+    baseline = load("baseline_bc16_summary.json")
+    plot_learning_curves(
+        baseline,
+        "CompactUNet (base_channels=16) — 20 epochs — 99 503 paramètres",
+        "baseline_20ep_learning_curves.png",
+    )
+
+    verify = load("verify_bc16_10ep/run_summary.json")
+    plot_learning_curves(
+        verify,
+        "CompactUNet (base_channels=16) — 10 epochs — Dice corrigé — 99 503 paramètres",
+        "verify_bc16_10ep_learning_curves.png",
+    )
+
+    baseline_nocrop = load("baseline_nocrop_summary.json")
+    plot_learning_curves(
+        baseline_nocrop,
+        "CompactUNet (base_channels=16) — 10 epochs — sans crop (256×256) — seed=0",
+        "baseline_nocrop_10ep_learning_curves.png",
+    )
+
+    crop = load("crop_summary.json")
+    plot_learning_curves(
+        crop,
+        "CompactUNet (base_channels=16) — 10 epochs — avec crop (160×160) — seed=0",
+        "crop_10ep_learning_curves.png",
+    )
+
+
+if __name__ == "__main__":
+    main()
