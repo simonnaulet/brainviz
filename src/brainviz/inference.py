@@ -29,11 +29,16 @@ def predict_preprocessed(
     subject_path: str | Path,
     *,
     planes: Iterable[int] = (0, 1, 2),
+    slice_spacings: Iterable[int] = (1,),
     batch_size: int = 16,
     device: str | torch.device = "cuda",
     amp: bool = True,
 ) -> tuple[np.ndarray, dict]:
-    """Retourne les probabilités `[4,X,Y,Z]` dans le crop canonique paddé."""
+    """Retourne les probabilités `[4,X,Y,Z]` moyennées sur les vues demandées.
+
+    Une vue est un couple ``(plan, espacement inter-coupes)``. Le comportement
+    historique correspond à ``slice_spacings=(1,)``.
+    """
     with np.load(subject_path, allow_pickle=False) as archive:
         item = {key: archive[key] for key in archive.files if key != "metadata"}
         metadata = json.loads(str(archive["metadata"]))
@@ -42,22 +47,30 @@ def predict_preprocessed(
     )
     device = torch.device(device)
     model.eval()
-    plane_probabilities = []
+    planes = tuple(int(plane) for plane in planes)
+    slice_spacings = tuple(int(spacing) for spacing in slice_spacings)
+    if not planes or any(plane not in range(3) for plane in planes):
+        raise ValueError("planes doit contenir au moins un plan parmi 0, 1, 2")
+    if not slice_spacings or any(spacing < 1 for spacing in slice_spacings):
+        raise ValueError("slice_spacings doit contenir des entiers strictement positifs")
+    view_probabilities = []
     for plane in planes:
         oriented = to_plane(channels, plane, channel_first=True)
-        results = []
-        for start in range(0, oriented.shape[1], batch_size):
-            centers = np.arange(start, min(start + batch_size, oriented.shape[1]))
-            stacks = [oriented[:, np.clip(center + np.arange(-2, 3), 0, oriented.shape[1] - 1)] for center in centers]
-            x = torch.from_numpy(np.ascontiguousarray(np.stack(stacks))).float().to(device)
-            p = torch.full((len(stacks),), plane, dtype=torch.long, device=device)
-            with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=amp and device.type == "cuda"):
-                probabilities = model(x, p).softmax(dim=1)
-            results.append(probabilities.float().cpu().numpy())
-        # [S,C,H,W] -> [C,S,H,W] -> [C,X,Y,Z]
-        probability = np.concatenate(results, axis=0).transpose(1, 0, 2, 3)
-        plane_probabilities.append(from_plane(probability, plane, channel_first=True))
-    probabilities = np.mean(plane_probabilities, axis=0)
+        for spacing in slice_spacings:
+            results = []
+            offsets = spacing * np.arange(-2, 3)
+            for start in range(0, oriented.shape[1], batch_size):
+                centers = np.arange(start, min(start + batch_size, oriented.shape[1]))
+                stacks = [oriented[:, np.clip(center + offsets, 0, oriented.shape[1] - 1)] for center in centers]
+                x = torch.from_numpy(np.ascontiguousarray(np.stack(stacks))).float().to(device)
+                p = torch.full((len(stacks),), plane, dtype=torch.long, device=device)
+                with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=amp and device.type == "cuda"):
+                    probabilities = model(x, p).softmax(dim=1)
+                results.append(probabilities.float().cpu().numpy())
+            # [S,C,H,W] -> [C,S,H,W] -> [C,X,Y,Z]
+            probability = np.concatenate(results, axis=0).transpose(1, 0, 2, 3)
+            view_probabilities.append(from_plane(probability, plane, channel_first=True))
+    probabilities = np.mean(view_probabilities, axis=0)
     outside = ~_prediction_support(item)
     probabilities[:, outside] = 0
     probabilities[0, outside] = 1

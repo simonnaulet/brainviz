@@ -125,6 +125,7 @@ def command_predict(args: argparse.Namespace) -> None:
             model,
             args.subject,
             planes=planes,
+            slice_spacings=args.slice_spacings,
             batch_size=args.batch_size,
             device=device,
             amp=not args.no_amp,
@@ -146,6 +147,16 @@ def command_evaluate(args: argparse.Namespace) -> None:
     if target.max() > 3:
         target = np.vectorize(LABEL_MAP.__getitem__)(target)
     print(json.dumps(segmentation_metrics(prediction, target, target_image.header.get_zooms()[:3]), indent=2))
+
+
+def positive_int_list(value: str) -> tuple[int, ...]:
+    try:
+        result = tuple(int(part.strip()) for part in value.split(","))
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("liste d'entiers attendue, par exemple 1 ou 1,2") from error
+    if not result or any(item < 1 for item in result):
+        raise argparse.ArgumentTypeError("les espacements doivent être strictement positifs")
+    return result
 
 
 def command_benchmark(args: argparse.Namespace) -> None:
@@ -275,6 +286,12 @@ def build_parser() -> argparse.ArgumentParser:
     predict.add_argument("subject", type=Path)
     predict.add_argument("output", type=Path)
     predict.add_argument("--planes", default="config", help="config, all, axial, coronal ou sagittal séparés par des virgules")
+    predict.add_argument(
+        "--slice-spacings",
+        type=positive_int_list,
+        default=(1,),
+        help="espacements de coupes moyennés, par exemple 1 ou 1,2 (défaut: 1)",
+    )
     predict.add_argument("--batch-size", type=int, default=16)
     predict.add_argument("--device", default="auto")
     predict.add_argument("--no-amp", action="store_true")
