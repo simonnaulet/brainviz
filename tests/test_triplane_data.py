@@ -141,6 +141,10 @@ def test_sampler_is_deterministic_and_full_patch_is_centered(tmp_path):
     first = list(RandomPlaneBatchSampler(slices, batch_size=2, iterations=2, seed=9))
     second = list(RandomPlaneBatchSampler(slices, batch_size=2, iterations=2, seed=9))
     assert first == second
+    d1_batches = RandomPlaneBatchSampler(
+        slices, batch_size=4, iterations=3, seed=9, d1_probability=1.0
+    )
+    assert all(request.spacing == 1 for batch in d1_batches for request in batch)
     volumes = VolumePatchDataset([path], (40, 24, 32), augment=False)
     request = next(iter(Random3DPatchBatchSampler(volumes, batch_size=1, iterations=1, seed=9)))[0]
     assert request.center == (shape[0] // 2, shape[1] // 2, shape[2] // 2)

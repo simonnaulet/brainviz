@@ -5,11 +5,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import tomllib
+from typing import Any
 
 from brainviz.models import CompactUNet, TinyUNet2D, TriPlaneRepSliceMixNet, UNet3D21D
 
+Config = dict[str, Any]
 
-def load_config(path: str | Path) -> dict:
+
+def load_config(path: str | Path) -> Config:
     path = Path(path)
     with path.open("rb") as stream:
         config = tomllib.load(stream)
@@ -24,10 +27,13 @@ def load_config(path: str | Path) -> dict:
     return config
 
 
-def _deep_merge(base: dict, override: dict) -> dict:
+def _deep_merge(base: Config, override: Config) -> Config:
     result = dict(base)
     for key, value in override.items():
-        result[key] = _deep_merge(result[key], value) if key in result and isinstance(result[key], dict) and isinstance(value, dict) else value
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
     return result
 
 
@@ -40,7 +46,7 @@ def load_splits(path: str | Path) -> list[dict[str, list[str]]]:
     return splits
 
 
-def build_model(config: dict):
+def build_model(config: Config):
     model = config["model"]
     architecture = model.get("architecture", "rep_slicemix")
     if architecture == "compact_unet":
@@ -69,5 +75,7 @@ def build_model(config: dict):
         multi_branch=bool(model.get("multi_branch", True)),
         film=bool(model.get("film", True)),
         down3_mode=str(model.get("down3_mode", "dense")),
+        bottleneck_kernel_size=int(model.get("bottleneck_kernel_size", 3)),
+        deep_supervision=bool(model.get("deep_supervision", False)),
         input_indices=tuple(model.get("input_indices", range(int(model.get("in_channels", 6))))),
     )

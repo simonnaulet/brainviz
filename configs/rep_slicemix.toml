@@ -16,6 +16,8 @@ mlp_ratio = 2
 multi_branch = true
 film = true
 down3_mode = "dense"
+bottleneck_kernel_size = 3
+deep_supervision = false
 
 [sampling]
 batch_size = 16
@@ -38,9 +40,9 @@ log_every = 10
 output_dir = "artifacts/rep_slicemix/runs"
 
 [validation]
-axial_every = 1
+axial_every = 5
 triplane_every = 10
-batch_size = 16
+batch_size = 32
 
 [loss]
 dice_weight = 0.6

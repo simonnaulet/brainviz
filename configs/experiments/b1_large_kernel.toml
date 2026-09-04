@@ -1,0 +1,8 @@
+extends = "../rep_slicemix.toml"
+
+[model]
+bottleneck_kernel_size = 7
+deep_supervision = false
+
+[training]
+output_dir = "artifacts/rep_slicemix/ablations/b1_large_kernel"

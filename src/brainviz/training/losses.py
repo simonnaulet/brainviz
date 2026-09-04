@@ -49,8 +49,13 @@ class CompositeSegmentationLoss(nn.Module):
         ce_map = F.cross_entropy(logits, target, reduction="none")
         valid_count = valid_f.sum().clamp_min(1)
         ce = (ce_map * valid_f).sum() / valid_count
-        weights = boundary_weights(target, valid)
-        boundary_ce = (ce_map * weights).sum() / weights.sum().clamp_min(1)
+        if self.boundary_weight:
+            weights = boundary_weights(target, valid)
+            boundary_ce = (ce_map * weights).sum() / weights.sum().clamp_min(1)
+        else:
+            # Les sorties de supervision profonde n'utilisent pas BoundaryCE.
+            # Éviter de construire leurs cartes de frontières inutilement.
+            boundary_ce = logits.new_zeros(())
         total = self.dice_weight * dice + self.ce_weight * ce + self.boundary_weight * boundary_ce
         return {
             "loss": total,
@@ -59,3 +64,65 @@ class CompositeSegmentationLoss(nn.Module):
             "boundary_ce": boundary_ce.detach(),
             "mean_soft_dice": dice_per_class[1:].mean().detach(),
         }
+
+
+class DeepSupervisionLoss(nn.Module):
+    """Applique la loss principale à H et Dice+CE aux sorties H/2 et H/4."""
+
+    def __init__(
+        self,
+        main_loss: CompositeSegmentationLoss,
+        auxiliary_weights: tuple[float, ...] = (0.5, 0.25),
+    ) -> None:
+        super().__init__()
+        if not auxiliary_weights or any(weight < 0 for weight in auxiliary_weights):
+            raise ValueError("les poids de supervision profonde doivent être positifs")
+        non_boundary_total = main_loss.dice_weight + main_loss.ce_weight
+        if non_boundary_total <= 0:
+            raise ValueError("Dice+CE doit avoir un poids non nul pour les sorties auxiliaires")
+        self.main_loss = main_loss
+        self.auxiliary_loss = CompositeSegmentationLoss(
+            dice_weight=main_loss.dice_weight / non_boundary_total,
+            ce_weight=main_loss.ce_weight / non_boundary_total,
+            boundary_weight=0.0,
+        )
+        raw_weights = (1.0, *auxiliary_weights)
+        weight_sum = sum(raw_weights)
+        self.output_weights = tuple(weight / weight_sum for weight in raw_weights)
+
+    @staticmethod
+    def _resize_target(target: Tensor, valid: Tensor, size: tuple[int, int]) -> tuple[Tensor, Tensor]:
+        resized_target = F.interpolate(target[:, None].float(), size=size, mode="nearest")[:, 0].long()
+        resized_valid = F.interpolate(valid[:, None].float(), size=size, mode="nearest")[:, 0].bool()
+        return resized_target, resized_valid
+
+    def forward(
+        self,
+        logits: Tensor | tuple[Tensor, ...],
+        target: Tensor,
+        valid: Tensor | None = None,
+    ) -> dict[str, Tensor]:
+        if isinstance(logits, Tensor):
+            return self.main_loss(logits, target, valid)
+        if len(logits) != len(self.output_weights):
+            raise ValueError(
+                f"{len(self.output_weights)} sorties attendues pour la supervision profonde, obtenu {len(logits)}"
+            )
+        if valid is None:
+            valid = torch.ones_like(target, dtype=torch.bool)
+        main = self.main_loss(logits[0], target, valid)
+        total = self.output_weights[0] * main["loss"]
+        result = dict(main)
+        result["main_loss"] = main["loss"].detach()
+        for index, (auxiliary_logits, weight) in enumerate(
+            zip(logits[1:], self.output_weights[1:], strict=True), start=1
+        ):
+            auxiliary_target, auxiliary_valid = self._resize_target(
+                target, valid, tuple(auxiliary_logits.shape[-2:])
+            )
+            auxiliary = self.auxiliary_loss(auxiliary_logits, auxiliary_target, auxiliary_valid)
+            total = total + weight * auxiliary["loss"]
+            result[f"aux_{index}_loss"] = auxiliary["loss"].detach()
+            result[f"aux_{index}_soft_dice"] = auxiliary["mean_soft_dice"]
+        result["loss"] = total
+        return result

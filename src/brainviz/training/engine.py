@@ -28,7 +28,7 @@ from brainviz.data.triplane import (
     collate_slice_stacks,
 )
 from brainviz.inference import predict_preprocessed, predict_preprocessed_3d
-from brainviz.training.losses import CompositeSegmentationLoss
+from brainviz.training.losses import CompositeSegmentationLoss, DeepSupervisionLoss
 from brainviz.training.metrics import segmentation_metrics
 
 
@@ -160,16 +160,33 @@ def environment_info(device: torch.device) -> dict[str, Any]:
         properties = torch.cuda.get_device_properties(device)
         info["gpu"] = {
             "name": properties.name,
-            "capability": list(properties.major_minor) if hasattr(properties, "major_minor") else list(torch.cuda.get_device_capability(device)),
+            "capability": (
+                list(properties.major_minor)
+                if hasattr(properties, "major_minor")
+                else list(torch.cuda.get_device_capability(device))
+            ),
             "total_memory_mib": properties.total_memory / 2**20,
         }
     try:
-        result = subprocess.run(
-            ("git", "rev-parse", "HEAD"), capture_output=True, text=True, check=True, timeout=2
+        commit = subprocess.run(
+            ("git", "rev-parse", "HEAD"),
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=2,
         )
-        info["git_commit"] = result.stdout.strip()
+        status = subprocess.run(
+            ("git", "status", "--porcelain"),
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=2,
+        )
+        info["git_commit"] = commit.stdout.strip()
+        info["git_dirty"] = bool(status.stdout.strip())
     except (OSError, subprocess.SubprocessError):
         info["git_commit"] = None
+        info["git_dirty"] = None
     return info
 
 
@@ -193,7 +210,7 @@ def validate_volumes(
     batch_size: int,
     device: torch.device,
     amp: bool,
-) -> dict[str, float]:
+) -> dict[str, Any]:
     per_subject = []
     for path in paths:
         probabilities, metadata = predict_preprocessed(
@@ -204,7 +221,7 @@ def validate_volumes(
         per_subject.append(segmentation_metrics(probabilities.argmax(axis=0), target, metadata["spacing"]))
     keys = per_subject[0]
     result = {key: float(np.mean([metrics[key] for metrics in per_subject])) for key in keys}
-    result["subjects"] = per_subject  # type: ignore[assignment]
+    result["subjects"] = per_subject
     return result
 
 
@@ -215,16 +232,22 @@ def validate_volumes_3d(
     patch_size: int | tuple[int, int, int],
     device: torch.device,
     amp: bool,
-) -> dict[str, float]:
+) -> dict[str, Any]:
     per_subject = []
     for path in paths:
-        probabilities, metadata = predict_preprocessed_3d(model, path, patch_size=patch_size, device=device, amp=amp)
+        probabilities, metadata = predict_preprocessed_3d(
+            model,
+            path,
+            patch_size=patch_size,
+            device=device,
+            amp=amp,
+        )
         with np.load(path, allow_pickle=False) as archive:
             target = archive["label"]
         per_subject.append(segmentation_metrics(probabilities.argmax(axis=0), target, metadata["spacing"]))
     keys = per_subject[0]
     result = {key: float(np.mean([metrics[key] for metrics in per_subject])) for key in keys}
-    result["subjects"] = per_subject  # type: ignore[assignment]
+    result["subjects"] = per_subject
     return result
 
 
@@ -235,6 +258,7 @@ def train_fold(
     resume: str | Path | None = None,
     smoke: bool = False,
     device_name: str = "auto",
+    stop_after_epoch: int | None = None,
 ) -> Path:
     """Entraîne un fold. ``smoke`` limite le run à deux itérations sans validation volumique."""
     training = config["training"]
@@ -271,9 +295,14 @@ def train_fold(
         dataset = VolumePatchDataset(
             train_paths, patch_size, cache_size=int(data_cfg.get("cache_size", 8)), augment=True
         )
-        batch_size = min(1, int(patch_cfg.get("batch_size", 1))) if smoke else int(patch_cfg.get("batch_size", 1))
+        configured_batch_size = int(patch_cfg.get("batch_size", 1))
+        batch_size = min(1, configured_batch_size) if smoke else configured_batch_size
         sampler = Random3DPatchBatchSampler(
-            dataset, batch_size=batch_size, iterations=iterations, seed=seed, brain_probability=float(sampling["brain_probability"])
+            dataset,
+            batch_size=batch_size,
+            iterations=iterations,
+            seed=seed,
+            brain_probability=float(sampling["brain_probability"]),
         )
         collate_fn = None
     else:
@@ -300,7 +329,12 @@ def train_fold(
     )
 
     model = build_model(config).to(device)
-    criterion = CompositeSegmentationLoss(**config.get("loss", {})).to(device)
+    loss_config = dict(config.get("loss", {}))
+    deep_supervision_weights = tuple(loss_config.pop("deep_supervision_weights", (0.5, 0.25)))
+    criterion: nn.Module = CompositeSegmentationLoss(**loss_config)
+    if bool(config["model"].get("deep_supervision", False)):
+        criterion = DeepSupervisionLoss(criterion, deep_supervision_weights)
+    criterion = criterion.to(device)
     fused_adamw = bool(training.get("fused_adamw", False)) and device.type == "cuda"
     optimizer = torch.optim.AdamW(
         optimizer_groups(model, float(training["weight_decay"])),
@@ -308,6 +342,9 @@ def train_fold(
         fused=fused_adamw,
     )
     epochs = 1 if smoke else int(training["epochs"])
+    end_epoch = epochs if stop_after_epoch is None or smoke else min(int(stop_after_epoch), epochs)
+    if end_epoch < 1:
+        raise ValueError("stop_after_epoch doit être >= 1")
     total_steps = epochs * iterations
     warmup_steps = round(total_steps * float(training["warmup_fraction"]))
     scheduler = torch.optim.lr_scheduler.LambdaLR(
@@ -344,6 +381,10 @@ def train_fold(
         best_dice = float(checkpoint["best_dice"])
         if "rng_state" in checkpoint:
             restore_rng_state(checkpoint["rng_state"])
+    if start_epoch >= end_epoch:
+        raise ValueError(
+            f"le checkpoint est déjà à l'epoch {start_epoch}; stop_after_epoch doit être supérieur"
+        )
 
     try:
         from torch.utils.tensorboard import SummaryWriter
@@ -354,7 +395,7 @@ def train_fold(
     run_start = time.perf_counter()
     run_start_step = global_step
     log_every = int(training.get("log_every", 25))
-    for epoch in range(start_epoch, epochs):
+    for epoch in range(start_epoch, end_epoch):
         epoch_start = time.perf_counter()
         sampler.set_epoch(epoch)
         model.train()
@@ -392,7 +433,7 @@ def train_fold(
                 elapsed = time.perf_counter() - run_start
                 completed = max(1, global_step - run_start_step)
                 seconds_per_iteration = elapsed / completed
-                remaining = max(0, epochs * iterations - global_step) * seconds_per_iteration
+                remaining = max(0, end_epoch * iterations - global_step) * seconds_per_iteration
                 print(
                     f"epoch {epoch + 1}/{epochs} iter {iteration}/{iterations} "
                     f"loss={scalars['loss']:.4f} {seconds_per_iteration:.3f}s/it "
@@ -409,7 +450,9 @@ def train_fold(
         }
 
         is_3d = architecture == "unet_3d_21d"
-        full_validation = bool(val_paths) and not smoke and ((epoch + 1) % int(config["validation"]["triplane_every"]) == 0 or epoch + 1 == epochs)
+        full_validation = bool(val_paths) and not smoke and (
+            (epoch + 1) % int(config["validation"]["triplane_every"]) == 0 or epoch + 1 == end_epoch
+        )
         axial_validation = (
             not is_3d
             and not full_validation
@@ -421,7 +464,12 @@ def train_fold(
             ema_model = ema.model_copy(model).to(device)
             if axial_validation:
                 axial = validate_volumes(
-                    ema_model, val_paths, planes=(0,), batch_size=int(config["validation"]["batch_size"]), device=device, amp=amp
+                    ema_model,
+                    val_paths,
+                    planes=(0,),
+                    batch_size=int(config["validation"]["batch_size"]),
+                    device=device,
+                    amp=amp,
                 )
                 record["val_axial"] = axial
                 print(_validation_summary("axial", epoch + 1, axial), flush=True)

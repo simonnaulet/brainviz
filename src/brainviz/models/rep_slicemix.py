@@ -18,7 +18,14 @@ def count_parameters(model: nn.Module, trainable_only: bool = False) -> int:
 class _RepDW(nn.Module):
     """Convolution depthwise multi-branche fusionnable, en 2D ou 3D."""
 
-    def __init__(self, channels: int, kernel_size: Sequence[int], *, multi_branch: bool = True) -> None:
+    def __init__(
+        self,
+        channels: int,
+        kernel_size: Sequence[int],
+        *,
+        multi_branch: bool = True,
+        auxiliary_kernel_sizes: Sequence[Sequence[int]] = (),
+    ) -> None:
         super().__init__()
         self.channels = channels
         self.kernel_size = tuple(kernel_size)
@@ -26,13 +33,28 @@ class _RepDW(nn.Module):
         self.multi_branch = multi_branch
         if self.dim not in (2, 3) or any(k % 2 == 0 for k in self.kernel_size):
             raise ValueError("RepDW attend un kernel 2D/3D de dimensions impaires")
+        auxiliary_kernel_sizes = tuple(tuple(kernel) for kernel in auxiliary_kernel_sizes)
+        if any(
+            len(kernel) != self.dim
+            or any(k % 2 == 0 or k > main for k, main in zip(kernel, self.kernel_size, strict=True))
+            for kernel in auxiliary_kernel_sizes
+        ):
+            raise ValueError("les kernels auxiliaires doivent être impairs et inclus dans le kernel principal")
         conv_cls = nn.Conv2d if self.dim == 2 else nn.Conv3d
         bn_cls = nn.BatchNorm2d if self.dim == 2 else nn.BatchNorm3d
         padding = tuple(k // 2 for k in self.kernel_size)
         one = (1,) * self.dim
         self.main_conv = conv_cls(channels, channels, self.kernel_size, padding=padding, groups=channels, bias=False)
         self.main_bn = bn_cls(channels)
+        self.auxiliary_convs = nn.ModuleList()
+        self.auxiliary_bns = nn.ModuleList()
         if multi_branch:
+            for kernel in auxiliary_kernel_sizes:
+                auxiliary_padding = tuple(k // 2 for k in kernel)
+                self.auxiliary_convs.append(
+                    conv_cls(channels, channels, kernel, padding=auxiliary_padding, groups=channels, bias=False)
+                )
+                self.auxiliary_bns.append(bn_cls(channels))
             self.point_conv = conv_cls(channels, channels, one, groups=channels, bias=False)
             self.point_bn = bn_cls(channels)
             self.identity_bn = bn_cls(channels)
@@ -47,6 +69,8 @@ class _RepDW(nn.Module):
             return self.reparam_conv(x)
         y = self.main_bn(self.main_conv(x))
         if self.multi_branch:
+            for conv, bn in zip(self.auxiliary_convs, self.auxiliary_bns, strict=True):
+                y = y + bn(conv(x))
             y = y + self.point_bn(self.point_conv(x)) + self.identity_bn(x)
         return y
 
@@ -78,6 +102,22 @@ class _RepDW(nn.Module):
         kernel, bias = self._fuse_conv_bn(self.main_conv, self.main_bn)
         if not self.multi_branch:
             return kernel, bias
+        for auxiliary_conv, auxiliary_bn in zip(self.auxiliary_convs, self.auxiliary_bns, strict=True):
+            auxiliary_kernel, auxiliary_bias = self._fuse_conv_bn(auxiliary_conv, auxiliary_bn)
+            padded_auxiliary = torch.zeros_like(kernel)
+            slices = zip(
+                self.kernel_size,
+                auxiliary_kernel.shape[2:],
+                strict=True,
+            )
+            destination = (
+                slice(None),
+                slice(None),
+                *(slice((main - small) // 2, (main + small) // 2) for main, small in slices),
+            )
+            padded_auxiliary[destination] = auxiliary_kernel
+            kernel = kernel + padded_auxiliary
+            bias = bias + auxiliary_bias
         point_kernel, point_bias = self._fuse_conv_bn(self.point_conv, self.point_bn)
         padded_point = torch.zeros_like(kernel)
         center = (slice(None), slice(None), *(k // 2 for k in self.kernel_size))
@@ -104,7 +144,15 @@ class _RepDW(nn.Module):
         conv.weight.data.copy_(kernel)
         conv.bias.data.copy_(bias)
         self.reparam_conv = conv
-        for name in ("main_conv", "main_bn", "point_conv", "point_bn", "identity_bn"):
+        for name in (
+            "main_conv",
+            "main_bn",
+            "auxiliary_convs",
+            "auxiliary_bns",
+            "point_conv",
+            "point_bn",
+            "identity_bn",
+        ):
             if hasattr(self, name):
                 delattr(self, name)
         return self
@@ -116,8 +164,20 @@ class RepDW3d(_RepDW):
 
 
 class RepDW2d(_RepDW):
-    def __init__(self, channels: int, kernel_size: Sequence[int] = (3, 3), *, multi_branch: bool = True) -> None:
-        super().__init__(channels, kernel_size, multi_branch=multi_branch)
+    def __init__(
+        self,
+        channels: int,
+        kernel_size: Sequence[int] = (3, 3),
+        *,
+        multi_branch: bool = True,
+        auxiliary_kernel_sizes: Sequence[Sequence[int]] = (),
+    ) -> None:
+        super().__init__(
+            channels,
+            kernel_size,
+            multi_branch=multi_branch,
+            auxiliary_kernel_sizes=auxiliary_kernel_sizes,
+        )
 
 
 class RepSliceMix(nn.Module):
@@ -143,10 +203,23 @@ class RepSliceMix(nn.Module):
 
 
 class Block2D(nn.Module):
-    def __init__(self, channels: int, *, mlp_ratio: int = 2, multi_branch: bool = True) -> None:
+    def __init__(
+        self,
+        channels: int,
+        *,
+        mlp_ratio: int = 2,
+        multi_branch: bool = True,
+        spatial_kernel_size: int = 3,
+        auxiliary_kernel_sizes: Sequence[int] = (),
+    ) -> None:
         super().__init__()
         hidden = channels * mlp_ratio
-        self.spatial = RepDW2d(channels, multi_branch=multi_branch)
+        self.spatial = RepDW2d(
+            channels,
+            (spatial_kernel_size, spatial_kernel_size),
+            multi_branch=multi_branch,
+            auxiliary_kernel_sizes=tuple((kernel, kernel) for kernel in auxiliary_kernel_sizes),
+        )
         self.mlp = nn.Sequential(
             nn.Conv2d(channels, hidden, 1),
             nn.GELU(),
@@ -223,6 +296,8 @@ class TriPlaneRepSliceMixNet(nn.Module):
         multi_branch: bool = True,
         film: bool = True,
         down3_mode: str = "dense",
+        bottleneck_kernel_size: int = 3,
+        deep_supervision: bool = False,
         input_indices: Sequence[int] | None = None,
     ) -> None:
         super().__init__()
@@ -232,6 +307,8 @@ class TriPlaneRepSliceMixNet(nn.Module):
             raise ValueError("depths doit contenir quatre entiers positifs")
         if down3_mode not in {"dense", "separable"}:
             raise ValueError("down3_mode doit valoir 'dense' ou 'separable'")
+        if bottleneck_kernel_size < 3 or bottleneck_kernel_size % 2 == 0:
+            raise ValueError("bottleneck_kernel_size doit être impair et >= 3")
         c1, c2, c3, c4 = widths
         self.in_channels = in_channels
         self.input_indices = tuple(range(in_channels)) if input_indices is None else tuple(input_indices)
@@ -239,6 +316,7 @@ class TriPlaneRepSliceMixNet(nn.Module):
             raise ValueError("input_indices doit contenir in_channels éléments")
         self.num_classes = num_classes
         self.widths = tuple(widths)
+        self.deep_supervision = deep_supervision
         self.center_branch = nn.Sequential(
             nn.Conv2d(in_channels, 16, 3, padding=1, bias=False),
             nn.BatchNorm2d(16),
@@ -249,21 +327,36 @@ class TriPlaneRepSliceMixNet(nn.Module):
             nn.BatchNorm3d(c1),
             nn.GELU(),
         )
-        self.stage1 = nn.Sequential(*(RepSliceMix(c1, 5, mlp_ratio=mlp_ratio, multi_branch=multi_branch) for _ in range(depths[0])))
+        self.stage1 = nn.Sequential(
+            *(
+                RepSliceMix(c1, 5, mlp_ratio=mlp_ratio, multi_branch=multi_branch)
+                for _ in range(depths[0])
+            )
+        )
         self.film1, self.pool1 = PlaneFiLM(c1, film), SlicePool(c1, 5)
         self.down1 = nn.Sequential(
             nn.Conv3d(c1, c2, (3, 1, 1), stride=(1, 2, 2), bias=False),
             nn.BatchNorm3d(c2),
             nn.GELU(),
         )
-        self.stage2 = nn.Sequential(*(RepSliceMix(c2, 3, mlp_ratio=mlp_ratio, multi_branch=multi_branch) for _ in range(depths[1])))
+        self.stage2 = nn.Sequential(
+            *(
+                RepSliceMix(c2, 3, mlp_ratio=mlp_ratio, multi_branch=multi_branch)
+                for _ in range(depths[1])
+            )
+        )
         self.film2, self.pool2 = PlaneFiLM(c2, film), SlicePool(c2, 3)
         self.down2 = nn.Sequential(
             nn.Conv3d(c2, c3, (3, 1, 1), stride=(1, 2, 2), bias=False),
             nn.BatchNorm3d(c3),
             nn.GELU(),
         )
-        self.stage3 = nn.Sequential(*(RepSliceMix(c3, 1, mlp_ratio=mlp_ratio, multi_branch=multi_branch) for _ in range(depths[2])))
+        self.stage3 = nn.Sequential(
+            *(
+                RepSliceMix(c3, 1, mlp_ratio=mlp_ratio, multi_branch=multi_branch)
+                for _ in range(depths[2])
+            )
+        )
         self.film3, self.pool3 = PlaneFiLM(c3, film), SlicePool(c3, 1)
         if down3_mode == "dense":
             down_conv: nn.Module = nn.Conv2d(c3, c4, 3, stride=2, padding=1, bias=False)
@@ -273,7 +366,19 @@ class TriPlaneRepSliceMixNet(nn.Module):
                 nn.Conv2d(c3, c4, 1, bias=False),
             )
         self.down3 = nn.Sequential(down_conv, nn.BatchNorm2d(c4), nn.GELU())
-        self.bottle = nn.Sequential(*(Block2D(c4, mlp_ratio=mlp_ratio, multi_branch=multi_branch) for _ in range(depths[3])))
+        auxiliary_kernels = (3,) if bottleneck_kernel_size > 3 else ()
+        self.bottle = nn.Sequential(
+            *(
+                Block2D(
+                    c4,
+                    mlp_ratio=mlp_ratio,
+                    multi_branch=multi_branch,
+                    spatial_kernel_size=bottleneck_kernel_size,
+                    auxiliary_kernel_sizes=auxiliary_kernels,
+                )
+                for _ in range(depths[3])
+            )
+        )
         self.decoder = nn.ModuleList(
             [
                 DecoderStage(c4, c3, multi_branch=multi_branch),
@@ -283,8 +388,11 @@ class TriPlaneRepSliceMixNet(nn.Module):
             ]
         )
         self.head = nn.Conv2d(16, num_classes, 1)
+        self.auxiliary_heads = nn.ModuleList(
+            (nn.Conv2d(c1, num_classes, 1), nn.Conv2d(c2, num_classes, 1)) if deep_supervision else ()
+        )
 
-    def forward(self, x: Tensor, plane: Tensor) -> Tensor:
+    def forward(self, x: Tensor, plane: Tensor) -> Tensor | tuple[Tensor, Tensor, Tensor]:
         if x.ndim != 5 or x.shape[2] != 5:
             raise ValueError(f"entrée [B,C,5,H,W] attendue, obtenu {tuple(x.shape)}")
         if x.shape[-2] % 16 or x.shape[-1] % 16:
@@ -302,9 +410,17 @@ class TriPlaneRepSliceMixNet(nn.Module):
         u3 = self.film3(self.stage3(x), plane)
         skip3 = self.pool3(u3, plane)
         x = self.bottle(self.down3(skip3))
-        for decoder, skip in zip(self.decoder, (skip3, skip2, skip1, skip0), strict=True):
+        auxiliary_features: list[Tensor] = []
+        for index, (decoder, skip) in enumerate(zip(self.decoder, (skip3, skip2, skip1, skip0), strict=True)):
             x = decoder(x, skip)
-        return self.head(x)
+            if self.training and self.deep_supervision and index in (1, 2):
+                auxiliary_features.append(x)
+        logits = self.head(x)
+        if self.training and self.deep_supervision:
+            # Ordre décroissant de résolution : sortie principale, H/2, H/4.
+            h4, h2 = auxiliary_features
+            return logits, self.auxiliary_heads[0](h2), self.auxiliary_heads[1](h4)
+        return logits
 
     def reparameterize(self, *, inplace: bool = True) -> "TriPlaneRepSliceMixNet":
         """Fusionne tous les RepDW. Le modèle doit être en mode évaluation."""
@@ -314,4 +430,7 @@ class TriPlaneRepSliceMixNet(nn.Module):
         for module in model.modules():
             if isinstance(module, _RepDW):
                 module.reparameterize()
+        if model.deep_supervision:
+            del model.auxiliary_heads
+            model.deep_supervision = False
         return model

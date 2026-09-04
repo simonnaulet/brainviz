@@ -1,0 +1,11 @@
+extends = "../rep_slicemix.toml"
+
+[model]
+bottleneck_kernel_size = 3
+deep_supervision = true
+
+[loss]
+deep_supervision_weights = [0.5, 0.25]
+
+[training]
+output_dir = "artifacts/rep_slicemix/ablations/b2_deep_supervision"

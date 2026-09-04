@@ -6,8 +6,9 @@ import argparse
 import gc
 import json
 from pathlib import Path
-import time
 import statistics
+import time
+from typing import Any
 
 import nibabel as nib
 import numpy as np
@@ -21,6 +22,16 @@ from brainviz.training.engine import train_fold
 from brainviz.training.metrics import segmentation_metrics
 
 
+DEFAULT_CONFIG = Path("configs/rep_slicemix.toml")
+
+
+def resolve_device(name: str) -> torch.device:
+    """Résout ``auto`` vers CUDA lorsqu'un GPU est disponible."""
+    if name == "auto":
+        name = "cuda" if torch.cuda.is_available() else "cpu"
+    return torch.device(name)
+
+
 def case_id(subject: Path) -> str:
     try:
         number = int(subject.name.removeprefix("subject-"))
@@ -30,7 +41,10 @@ def case_id(subject: Path) -> str:
 
 
 def command_preprocess(args: argparse.Namespace) -> None:
-    subjects = sorted(args.input_dir.glob("subject-*"), key=lambda path: int(path.name.split("-")[-1]))
+    subjects = sorted(
+        args.input_dir.glob("subject-*"),
+        key=lambda path: int(path.name.split("-")[-1]),
+    )
     if not subjects:
         raise FileNotFoundError(f"aucun sujet dans {args.input_dir}")
     for subject in subjects:
@@ -38,7 +52,13 @@ def command_preprocess(args: argparse.Namespace) -> None:
         if output.exists() and not args.force:
             raise FileExistsError(f"{output} existe déjà; utiliser --force pour l'écraser")
         print(f"{subject.name} -> {output}")
-        preprocess_subject(subject, output, margin=args.margin, multiple=args.multiple, require_label=not args.unlabeled)
+        preprocess_subject(
+            subject,
+            output,
+            margin=args.margin,
+            multiple=args.multiple,
+            require_label=not args.unlabeled,
+        )
 
 
 def command_inspect(args: argparse.Namespace) -> None:
@@ -61,8 +81,9 @@ def command_inspect(args: argparse.Namespace) -> None:
         with torch.no_grad():
             y = model(x, plane)
             error = (y - deployed(x, plane)).abs().max().item()
-    result = {
-        "input": list(x.shape), "output": list(y.shape),
+    result: dict[str, Any] = {
+        "input": list(x.shape),
+        "output": list(y.shape),
         "training_parameters": training_parameters,
         "deployed_parameters": deployed_parameters,
         "reparameterization_max_error": error,
@@ -72,7 +93,9 @@ def command_inspect(args: argparse.Namespace) -> None:
         with profile(activities=[ProfilerActivity.CPU], with_flops=True) as profiler:
             with torch.no_grad():
                 deployed(x) if architecture == "unet_3d_21d" else deployed(x, plane)
-        result["profiled_forward_flops"] = int(sum(event.flops or 0 for event in profiler.key_averages()))
+        result["profiled_forward_flops"] = int(
+            sum(event.flops or 0 for event in profiler.key_averages())
+        )
     print(json.dumps(result, indent=2))
 
 
@@ -81,11 +104,21 @@ def command_train(args: argparse.Namespace) -> None:
     if args.epochs is not None:
         config["training"]["epochs"] = args.epochs
     fold = args.fold if args.fold == "all" else int(args.fold)
-    run = train_fold(config, fold, resume=args.resume, smoke=args.smoke, device_name=args.device)
+    run = train_fold(
+        config,
+        fold,
+        resume=args.resume,
+        smoke=args.smoke,
+        device_name=args.device,
+        stop_after_epoch=args.stop_after_epoch,
+    )
     print(f"Run terminé: {run}")
 
 
-def _model_from_checkpoint(path: Path, device: torch.device):
+def _model_from_checkpoint(
+    path: Path,
+    device: torch.device,
+) -> tuple[torch.nn.Module, dict[str, Any]]:
     checkpoint = torch.load(path, map_location=device, weights_only=False)
     config = checkpoint["config"]
     model = build_model(config).eval()
@@ -106,21 +139,36 @@ def command_export(args: argparse.Namespace) -> None:
     if reparameterized:
         model.eval().reparameterize()
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({"model": model.state_dict(), "config": config, "reparameterized": reparameterized}, args.output)
+    torch.save(
+        {
+            "model": model.state_dict(),
+            "config": config,
+            "reparameterized": reparameterized,
+        },
+        args.output,
+    )
     operation = "fusionné" if reparameterized else "exporté"
     print(f"Modèle {operation} ({count_parameters(model):,} paramètres): {args.output}")
 
 
 def command_predict(args: argparse.Namespace) -> None:
     start = time.perf_counter()
-    device = torch.device(args.device if args.device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu"))
+    device = resolve_device(args.device)
     model, config = _model_from_checkpoint(args.checkpoint, device)
     if config["model"].get("architecture") == "unet_3d_21d":
         probabilities, metadata = predict_preprocessed_3d(
-            model, args.subject, patch_size=config["patch3d"]["patch_size"], device=device, amp=not args.no_amp
+            model,
+            args.subject,
+            patch_size=config["patch3d"]["patch_size"],
+            device=device,
+            amp=not args.no_amp,
         )
     else:
-        planes = tuple(config["sampling"].get("planes", (0, 1, 2))) if args.planes == "config" else parse_planes(args.planes)
+        planes = (
+            tuple(config["sampling"].get("planes", (0, 1, 2)))
+            if args.planes == "config"
+            else parse_planes(args.planes)
+        )
         probabilities, metadata = predict_preprocessed(
             model,
             args.subject,
@@ -130,15 +178,23 @@ def command_predict(args: argparse.Namespace) -> None:
             device=device,
             amp=not args.no_amp,
         )
-    output = restore_prediction(probabilities.argmax(axis=0).astype(np.uint8), metadata, raw_labels=not args.contiguous_labels)
+    output = restore_prediction(
+        probabilities.argmax(axis=0).astype(np.uint8),
+        metadata,
+        raw_labels=not args.contiguous_labels,
+    )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     nib.save(output, args.output)
     print(f"Prédiction écrite: {args.output} ({time.perf_counter() - start:.2f} s/volume)")
 
 
 def command_evaluate(args: argparse.Namespace) -> None:
-    prediction_image, target_image = nib.squeeze_image(nib.load(args.prediction)), nib.squeeze_image(nib.load(args.target))
-    if prediction_image.shape != target_image.shape or not np.allclose(prediction_image.affine, target_image.affine):
+    prediction_image = nib.squeeze_image(nib.load(args.prediction))
+    target_image = nib.squeeze_image(nib.load(args.target))
+    if prediction_image.shape != target_image.shape or not np.allclose(
+        prediction_image.affine,
+        target_image.affine,
+    ):
         raise ValueError("prédiction et cible n'ont pas la même géométrie")
     prediction = np.rint(np.asarray(prediction_image.dataobj)).astype(np.int16)
     target = np.rint(np.asarray(target_image.dataobj)).astype(np.int16)
@@ -146,7 +202,12 @@ def command_evaluate(args: argparse.Namespace) -> None:
         prediction = np.vectorize(LABEL_MAP.__getitem__)(prediction)
     if target.max() > 3:
         target = np.vectorize(LABEL_MAP.__getitem__)(target)
-    print(json.dumps(segmentation_metrics(prediction, target, target_image.header.get_zooms()[:3]), indent=2))
+    metrics = segmentation_metrics(
+        prediction,
+        target,
+        target_image.header.get_zooms()[:3],
+    )
+    print(json.dumps(metrics, indent=2))
 
 
 def positive_int_list(value: str) -> tuple[int, ...]:
@@ -161,7 +222,7 @@ def positive_int_list(value: str) -> tuple[int, ...]:
 
 def command_benchmark(args: argparse.Namespace) -> None:
     config = load_config(args.config)
-    device = torch.device(args.device if args.device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu"))
+    device = resolve_device(args.device)
     model = build_model(config).eval().to(device)
     if args.deployed and hasattr(model, "reparameterize"):
         model.reparameterize()
@@ -175,19 +236,31 @@ def command_benchmark(args: argparse.Namespace) -> None:
         plane = torch.zeros(args.batch_size, dtype=torch.long, device=device)
         forward = lambda: model(x, plane)
     for _ in range(args.warmup):
-        with torch.inference_mode(), torch.autocast(device_type=device.type, dtype=torch.float16, enabled=device.type == "cuda"):
+        with torch.inference_mode(), torch.autocast(
+            device_type=device.type,
+            dtype=torch.float16,
+            enabled=device.type == "cuda",
+        ):
             forward()
     if device.type == "cuda":
         torch.cuda.synchronize()
         torch.cuda.reset_peak_memory_stats()
     start = time.perf_counter()
     for _ in range(args.iterations):
-        with torch.inference_mode(), torch.autocast(device_type=device.type, dtype=torch.float16, enabled=device.type == "cuda"):
+        with torch.inference_mode(), torch.autocast(
+            device_type=device.type,
+            dtype=torch.float16,
+            enabled=device.type == "cuda",
+        ):
             forward()
     if device.type == "cuda":
         torch.cuda.synchronize()
     elapsed = (time.perf_counter() - start) / args.iterations
-    result = {"device": str(device), "milliseconds_per_batch": elapsed * 1000, "parameters": count_parameters(model)}
+    result = {
+        "device": str(device),
+        "milliseconds_per_batch": elapsed * 1000,
+        "parameters": count_parameters(model),
+    }
     if device.type == "cuda":
         result["peak_memory_mib"] = torch.cuda.max_memory_allocated() / 2**20
     print(json.dumps(result, indent=2))
@@ -209,7 +282,10 @@ def command_probe_3d(args: argparse.Namespace) -> None:
             subject_shapes.append((z, x, y))
         if not subject_shapes:
             raise FileNotFoundError(f"aucun sujet prétraité dans {preprocessed}")
-        full_shape = tuple(int(np.ceil(max(values) / 8) * 8) for values in zip(*subject_shapes, strict=True))
+        full_shape = tuple(
+            int(np.ceil(max(values) / 8) * 8)
+            for values in zip(*subject_shapes, strict=True)
+        )
         if full_shape not in shapes:
             shapes.append(full_shape)
     results = []
@@ -226,14 +302,25 @@ def command_probe_3d(args: argparse.Namespace) -> None:
             loss.backward()
             optimizer.step()
             torch.cuda.synchronize()
-            results.append({"patch": list(shape), "fits": True, "peak_memory_mib": torch.cuda.max_memory_allocated() / 2**20})
+            results.append(
+                {
+                    "patch": list(shape),
+                    "fits": True,
+                    "peak_memory_mib": torch.cuda.max_memory_allocated() / 2**20,
+                }
+            )
             del model, optimizer, x, loss
         except torch.OutOfMemoryError:
             results.append({"patch": list(shape), "fits": False})
             model = optimizer = x = loss = None
             gc.collect()
             torch.cuda.empty_cache()
-    print(json.dumps({"device": torch.cuda.get_device_name(), "batch_size": args.batch_size, "results": results}, indent=2))
+    summary = {
+        "device": torch.cuda.get_device_name(),
+        "batch_size": args.batch_size,
+        "results": results,
+    }
+    print(json.dumps(summary, indent=2))
 
 
 def command_summarize_cv(args: argparse.Namespace) -> None:
@@ -241,13 +328,16 @@ def command_summarize_cv(args: argparse.Namespace) -> None:
     for checkpoint_path in args.checkpoints:
         checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
         epochs.append(int(checkpoint["epoch"]) + 1)
-    print(json.dumps({"best_epochs": epochs, "final_epochs_median": round(statistics.median(epochs))}, indent=2))
+    result = {
+        "best_epochs": epochs,
+        "final_epochs_median": round(statistics.median(epochs)),
+    }
+    print(json.dumps(result, indent=2))
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="brainviz-repslice")
     subparsers = parser.add_subparsers(dest="command", required=True)
-    default_config = Path("configs/rep_slicemix.toml")
 
     preprocess = subparsers.add_parser("preprocess", help="prétraite un dossier iSeg")
     preprocess.add_argument("--input-dir", type=Path, default=Path("dataset/train"))
@@ -259,7 +349,7 @@ def build_parser() -> argparse.ArgumentParser:
     preprocess.set_defaults(function=command_preprocess)
 
     inspect = subparsers.add_parser("inspect", help="shapes, paramètres et équivalence")
-    inspect.add_argument("--config", type=Path, default=default_config)
+    inspect.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     inspect.add_argument("--batch-size", type=int, default=2)
     inspect.add_argument("--height", type=int, default=160)
     inspect.add_argument("--width", type=int, default=128)
@@ -268,9 +358,14 @@ def build_parser() -> argparse.ArgumentParser:
     inspect.set_defaults(function=command_inspect)
 
     train = subparsers.add_parser("train", help="entraîne un fold")
-    train.add_argument("--config", type=Path, default=default_config)
+    train.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     train.add_argument("--fold", required=True, help="0..4 ou all pour le réentraînement final")
     train.add_argument("--epochs", type=int, help="surcharge la durée, notamment pour --fold all")
+    train.add_argument(
+        "--stop-after-epoch",
+        type=int,
+        help="arrête ce lancement après cette epoch sans raccourcir le scheduler",
+    )
     train.add_argument("--resume", type=Path)
     train.add_argument("--smoke", action="store_true")
     train.add_argument("--device", default="auto")
@@ -285,7 +380,11 @@ def build_parser() -> argparse.ArgumentParser:
     predict.add_argument("checkpoint", type=Path)
     predict.add_argument("subject", type=Path)
     predict.add_argument("output", type=Path)
-    predict.add_argument("--planes", default="config", help="config, all, axial, coronal ou sagittal séparés par des virgules")
+    predict.add_argument(
+        "--planes",
+        default="config",
+        help="config, all, axial, coronal ou sagittal séparés par des virgules",
+    )
     predict.add_argument(
         "--slice-spacings",
         type=positive_int_list,
@@ -304,7 +403,7 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.set_defaults(function=command_evaluate)
 
     benchmark = subparsers.add_parser("benchmark", help="mesure la latence d'un batch")
-    benchmark.add_argument("--config", type=Path, default=default_config)
+    benchmark.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     benchmark.add_argument("--device", default="auto")
     benchmark.add_argument("--batch-size", type=int, default=16)
     benchmark.add_argument("--height", type=int, default=160)

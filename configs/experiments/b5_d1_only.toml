@@ -1,0 +1,7 @@
+extends = "../rep_slicemix.toml"
+
+[sampling]
+d1_probability = 1.0
+
+[training]
+output_dir = "artifacts/rep_slicemix/ablations/b5_d1_only"
