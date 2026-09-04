@@ -22,3 +22,6 @@ artifacts/
 
 # Checkpoints de modèles entraînés
 *.pt
+
+# Sorties du pipeline Compact U-Net historique
+runs/
