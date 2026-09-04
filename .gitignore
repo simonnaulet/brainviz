@@ -12,3 +12,6 @@ wheels/
 # Données extraites / archives
 dataset/
 archives/
+
+# Checkpoints de modèles entraînés
+*.pt
