@@ -32,10 +32,12 @@ La synthèse chiffrée et les décisions sont dans
 ## Démo rapide
 
 Le notebook [notebooks/demo_repslicemix.ipynb](notebooks/demo_repslicemix.ipynb)
-charge un checkpoint existant, évalue tout le fold de validation et affiche des
-coupes T1 avec vérité terrain, prédiction, superposition et erreurs. Aucun
-entraînement n'est lancé. Le chemin du checkpoint et le mode axial/tri-plan sont
-regroupés dans sa cellule `Configuration`.
+charge le checkpoint B0 fourni dans
+[`checkpoints/repslicemix_b0_fold0_best.pt`](checkpoints/repslicemix_b0_fold0_best.pt),
+évalue tout le fold de validation et affiche des coupes T1 avec vérité terrain,
+prédiction, superposition et erreurs. Aucun entraînement n'est lancé. Le chemin
+du checkpoint et le mode axial/tri-plan sont regroupés dans sa cellule
+`Configuration`. Le fichier de poids est versionné avec Git LFS.
 
 ## Méthode
 
@@ -150,6 +152,7 @@ par Git. Chaque configuration d'ablation possède son propre `output_dir` pour
 
 ```text
 configs/                 configurations et splits déterministes
+checkpoints/             checkpoint B0 de référence suivi avec Git LFS
 docs/                    protocole, model card et rapports d'ablation
 scripts/                 préparation, benchmarks et évaluation TTA
 notebooks/               exploration des données et démo du modèle entraîné
@@ -158,7 +161,7 @@ src/brainviz/models/     Rep-SliceMix et modèles de comparaison
 src/brainviz/training/   moteur, losses et métriques
 src/brainviz/inference.py
 tests/                   tests unitaires et d'intégration
-report/                  archive du prototype Compact U-Net initial
+report/                  rapport final, illustration et archives du prototype
 ```
 
 ## Vérifications

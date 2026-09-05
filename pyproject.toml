@@ -4,7 +4,10 @@ version = "0.1.0"
 description = "Reproducible 2D and 2.5D brain MRI segmentation baselines for iSeg-2017"
 readme = "README.md"
 authors = [
-    { name = "Simon NAULET", email = "simon.naulet85@gmail.com" }
+    { name = "Clément Castiglione" },
+    { name = "Matis Codjia" },
+    { name = "Simon Naulet", email = "simon.naulet85@gmail.com" },
+    { name = "William Parker" },
 ]
 requires-python = ">=3.13"
 dependencies = [

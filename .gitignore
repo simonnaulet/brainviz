@@ -23,6 +23,8 @@ artifacts/
 
 # Checkpoints de modèles entraînés
 *.pt
+!checkpoints/
+!checkpoints/*.pt
 
 # Sorties brutes des runs d'entraînement (poids + logs) ; les résumés utiles
 # sont recopiés à la main dans report/ (voir report/*_summary.json)
