@@ -1,23 +1,19 @@
-# Archive du prototype Compact U-Net
+# Rapport
 
-Ce dossier conserve le rapport et les figures produits avant l'adoption du
-protocole commun. Ils utilisent un split `subject-9/subject-10`, des coupes
-axiales et, pour les premiers runs, un Dice biaisé par une agrégation par batch.
-Ils ne doivent pas servir à comparer directement les architectures du pipeline
-actuel.
+Le rapport final est [`rapport.tex`](rapport.tex). Il décrit Rep-SliceMix-Net,
+les baselines locales, les ablations et les limites du protocole expérimental.
+La figure qualitative utilisée par le document est
+[`assets/segmentation_examples.png`](assets/segmentation_examples.png).
 
-Le calcul historique a été corrigé dans `brainviz.train` : accumulation sur le
-volume de chaque sujet, puis moyenne macro entre sujets. Les valeurs déjà
-produites avec l'ancienne formule restent invalides et ne sont pas réécrites.
-
-La comparaison contrôlée utilise le même fold, le même preprocessing, la même
-loss et la même validation volumique que Rep-SliceMix :
+Compilation depuis la racine du dépôt :
 
 ```bash
-brainviz-repslice train \
-  --config configs/experiments/compact_unet_fair.toml \
-  --fold 0
+latexmk -pdf -interaction=nonstopmode -halt-on-error \
+  -outdir=report report/rapport.tex
 ```
 
-Les résultats comparables et leurs limites sont dans
-[`docs/experiments.md`](../docs/experiments.md).
+`latexmk` relance automatiquement LaTeX pour résoudre les références internes.
+Le fichier
+`rapport_entrainement.md` et les JSON présents dans ce dossier sont des archives
+du prototype Compact U-Net antérieur au protocole commun. Leurs premiers scores
+ne doivent pas être repris, car l'ancienne agrégation du Dice était biaisée.

@@ -3,250 +3,686 @@
 \usepackage[french]{babel}
 \usepackage[utf8]{inputenc}
 \usepackage[T1]{fontenc}
-\usepackage[margin=2.5cm]{geometry}
+\usepackage{lmodern}
+\usepackage[margin=2.2cm]{geometry}
 \usepackage{graphicx}
+\graphicspath{{report/assets/}{assets/}{./}{../}}
 \usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{placeins}
 \usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{xcolor}
 \usepackage{hyperref}
+\usepackage{microtype}
 
-\title{Segmentation de tissus cérébraux sur IRM \\ \large Dataset iSeg-2017}
-\author{Hackathon SCIA 2026}
-\date{\today}
+\hypersetup{
+  colorlinks=true,
+  linkcolor=black,
+  citecolor=black,
+  urlcolor=blue
+}
+
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\newcommand{\CSF}{\mathrm{CSF}}
+\newcommand{\GM}{\mathrm{GM}}
+\newcommand{\WM}{\mathrm{WM}}
+\setlength{\emergencystretch}{3em}
+
+\title{Rep-SliceMix-Net : segmentation cérébrale 2.5D compacte sur iSeg-2017}
+\author{Clément Castiglione \quad Matis Codjia\\
+        Simon Naulet \quad William Parker}
+\date{5 septembre 2026}
 
 \begin{document}
 
 \maketitle
 
-\begin{quote}
-\textbf{Archive exploratoire.} Ce rapport décrit l'ancien pipeline Compact
-U-Net. Ses premiers scores reposent sur une agrégation du Dice par batch qui
-les surestime et ne doivent pas être comparés au protocole Rep-SliceMix. Les
-résultats de référence sont centralisés dans
-\texttt{docs/experiments.md}.
-\end{quote}
+\begin{abstract}
+La segmentation du cerveau à six mois est difficile en raison du faible
+contraste entre matière grise et matière blanche pendant la phase isointense.
+Nous proposons Rep-SliceMix-Net, un réseau 2.5D qui combine cinq coupes et
+partage ses poids entre les plans axial, coronal et sagittal. Son encodeur
+alterne des convolutions spatiales et inter-coupes par canal, puis un décodeur
+2D reconstruit la coupe centrale. Une reparamétrisation structurelle fusionne
+les branches utilisées pendant l'entraînement avant le déploiement. Le modèle
+final contient 543~380 paramètres déployés, soit environ 38 fois moins que la
+baseline nnU-Net 2D planifiée. Sur le fold étudié, composé de huit sujets
+d'entraînement et deux sujets de validation, il atteint des Dice de 0,95388 pour
+le liquide céphalo-rachidien, 0,91830 pour la matière grise et 0,89686 pour la
+matière blanche, soit une moyenne de 0,92302. La fusion tri-plan améliore cette
+moyenne de 0,89966 à 0,92302 face à l'inférence axiale du même modèle, sans
+ajouter de paramètres. Les résultats restent limités à un fold et devront être
+confirmés par validation croisée.
+\end{abstract}
 
 \section{Introduction}
 
-Ce projet vise à segmenter des IRM cérébrales de nourrissons en trois tissus
-d'intérêt (liquide céphalo-rachidien, matière grise, matière blanche) à
-partir du dataset public \textit{iSeg-2017}. Ce rapport présente le dataset,
-les choix de conception retenus pour préparer les données, et un problème
-identifié en cours d'exploration : la présence massive de tranches
-totalement vides dans le volume, ainsi que la solution mise en place pour
-pouvoir les exclure et en mesurer l'impact.
+iSeg-2017 porte sur la segmentation d'IRM cérébrales de nourrissons âgés de six
+mois en trois tissus : liquide céphalo-rachidien (CSF), matière grise (GM) et
+matière blanche (WM). À cet âge, l'intensité de la GM et de la WM se recouvre
+fortement sur les séquences T1 et T2. L'information locale est donc ambiguë et
+la position anatomique ainsi que le contexte spatial prennent une importance
+particulière \cite{wang2019iseg}.
 
-\section{Dataset}
+Le projet vise simultanément une segmentation précise, en particulier pour la
+GM et la WM, un faible nombre de paramètres et une architecture identifiable.
+Une première baseline nnU-Net v2 2D fournit un point de comparaison robuste,
+mais utilise plus de 20 millions de paramètres. Un U-Net 2D compact donne une
+borne basse de complexité. Entre ces deux régimes, nous étudions un modèle 2.5D
+qui conserve la résolution d'une coupe entière tout en exploitant un voisinage
+court dans la troisième dimension.
 
-Le dataset iSeg-2017 fournit, pour chaque sujet, deux volumes IRM 3D
-(modalités T1 et T2) ainsi qu'un volume de vérité terrain associant à chaque
-voxel l'une de quatre classes : fond, liquide céphalo-rachidien (LCR),
-matière grise et matière blanche. Les fichiers sont au format Analyze 7.5
-(paires \texttt{.hdr}/\texttt{.img}).
-
-Le dataset est scindé en deux ensembles :
+Les contributions principales sont les suivantes :
 \begin{itemize}
-  \item \textbf{Entraînement} : 10 sujets, avec label de vérité terrain ;
-  \item \textbf{Test} : 13 sujets, sans label (réservés à l'évaluation
-        externe du challenge iSeg-2017).
+  \item un encodeur 2.5D à mélange spatial et inter-coupes factorisé, associé à
+        un décodeur 2D léger ;
+  \item un seul jeu de poids pour les trois plans anatomiques, modulé par FiLM
+        et complété par une agrégation apprise des coupes ;
+  \item une étude contrôlée de la capacité, de la supervision profonde, de
+        l'espacement des coupes, des canaux de position et du coût de
+        l'inférence multi-plan.
 \end{itemize}
 
-Chaque volume 3D peut être découpé en tranches 2D selon l'un de ses trois
-axes ; les tranches obtenues selon des axes différents n'ont pas
-nécessairement la même taille, ce qui impose une mise à l'échelle commune
-avant de pouvoir les empiler dans un même tenseur.
+\section{Données et protocole}
 
-\section{Choix de conception}
+\subsection{Dataset et séparation des sujets}
 
-Le projet a été structuré autour d'un pipeline en trois étapes indépendantes
-du choix de segmentation proprement dit :
+Le dataset fournit dix sujets annotés et treize sujets de test sans annotation
+publique. Chaque sujet possède des volumes T1 et T2 co-enregistrés ainsi qu'une
+segmentation manuelle pour les données d'entraînement. Les quatre classes sont
+le fond, le CSF, la GM et la WM. L'absence des annotations de test empêche le
+calcul local d'un score officiel.
 
-\begin{itemize}
-  \item \textbf{Préparation} : les archives brutes du challenge sont
-        extraites et réorganisées en un dossier par sujet
-        (\texttt{dataset/train/subject-\emph{n}} et
-        \texttt{dataset/test/subject-\emph{n}}), séparant clairement les
-        sujets avec et sans label.
-  \item \textbf{Chargement} : les volumes sont découpés en tranches 2D selon
-        l'axe choisi, puis mis à l'échelle vers une taille carrée commune,
-        soit par remplissage (padding), soit par interpolation. Le label
-        étant catégoriel, son interpolation utilise systématiquement le mode
-        « plus proche voisin » pour ne jamais créer de classe inexistante
-        aux frontières entre tissus. Les valeurs brutes du label sont
-        ensuite remappées vers des indices de classe contigus, directement
-        exploitables par une fonction de coût standard de classification.
-  \item \textbf{Chargement PyTorch} : les tranches sont exposées via un
-        \texttt{Dataset}/\texttt{DataLoader} PyTorch classique, paramétré
-        par l'axe de coupe et la modalité (T1 ou T2) utilisée en entrée.
-\end{itemize}
+Toutes les séparations sont effectuées par sujet. Le fold 0 utilisé dans cette
+étude contient les sujets 002 à 007, 009 et 010 pour l'entraînement, puis les
+sujets 001 et 008 pour la validation. Cette séparation est commune à
+Rep-SliceMix-Net, au U-Net compact et à nnU-Net. Elle exclut toute fuite entre
+des coupes issues d'un même volume.
 
-Un module de visualisation permet d'afficher une tranche et son label
-légendé par classe, ainsi que de reconstruire et afficher en 3D (via
-marching cubes) les surfaces de segmentation d'un volume complet, que ce
-soit à partir de la vérité terrain ou d'une prédiction de modèle.
+\subsection{Prétraitement}
 
-Ces choix ne présument pas encore de l'architecture de segmentation
-elle-même, qui reste à définir ; ils fixent seulement la manière dont les
-données sont rendues exploitables en amont.
+Les volumes sont orientés dans le repère canonique RAS et rééchantillonnés à
+1~mm isotrope si nécessaire. L'isotropie permet de partager les poids entre les
+trois plans sans introduire de différence d'échelle. Un masque cérébral est
+calculé à partir des intensités finies et non nulles de T1 ou T2. Une fermeture
+morphologique, la conservation de la plus grande composante connexe et le
+remplissage des trous stabilisent ce masque. Les annotations ne sont utilisées
+ni pour le crop, ni pour la normalisation.
 
-\section{Tranches vides : constat et solution}
+Une boîte englobante avec une marge de huit voxels réduit le fond inutile. Les
+dimensions sont complétées jusqu'au multiple de 16 suivant. Chaque modalité est
+normalisée par z-score, avec des statistiques calculées uniquement dans le
+masque cérébral. Trois canaux de coordonnées normalisées $x$, $y$ et $z$
+sont calculés sur le volume canonique complet avant le crop, puis découpés avec
+les images. Ils conservent ainsi un repère de position commun. Un sujet
+prétraité contient T1, T2, les trois coordonnées, le masque cérébral et, pour
+l'ensemble d'entraînement, le label.
 
-En explorant le dataset, nous avons constaté qu'une grande partie des
-tranches extraites sont totalement noires : ce sont les coupes prises aux
-extrémités du volume 3D, en dehors de la zone occupée par le cerveau, où
-l'image comme le label ne contiennent que du fond. Ces tranches n'apportent
-aucune information utile à l'entraînement et risquent au contraire de le
-biaiser, le modèle pouvant apprendre à prédire le fond partout pour
-minimiser trivialement l'erreur.
+\subsection{Échantillonnage 2.5D et augmentations}
 
-Une mesure sur l'ensemble d'entraînement (10 sujets, découpage selon un seul
-axe, soit 2560 tranches au total) confirme l'ampleur du problème :
-\textbf{1550 tranches sur 2560 (environ 60~\%) sont entièrement dépourvues
-de tissu segmenté}, et ce de façon homogène d'un sujet à l'autre (entre 58~\%
-et 64~\% de tranches vides selon les sujets).
+Un élément d'entraînement est défini par un sujet, un plan, une coupe centrale
+$z$ et un espacement $d$. Le sujet et le plan sont tirés uniformément. Les cinq
+indices sont $[z-2d,z-d,z,z+d,z+2d]$, avec clamp aux limites. La configuration
+de référence utilise $d=1$ dans 75~\% des cas et $d=2$ dans 25~\% des cas. Le
+centre appartient à une coupe contenant du cerveau avec une probabilité de
+90~\%, ce qui limite les exemples entièrement vides tout en conservant une part
+de fond. L'entrée a la forme $[B,6,5,H,W]$ et la cible correspond uniquement à
+la coupe centrale.
 
-Pour pouvoir retirer ces tranches au besoin, et plus généralement doser la
-part de tranches peu remplies conservées, nous avons ajouté au chargement
-des données un seuil configurable : une tranche n'est gardée que si la
-fraction de ses pixels appartenant à un tissu (donc hors fond) atteint ce
-seuil. Fixé à 0, ce seuil ne filtre rien ; augmenté, il élimine d'abord les
-tranches vides, puis progressivement les tranches les moins informatives.
+Les flips, rotations jusqu'à $15^\circ$ et changements d'échelle de 10~\% sont
+appliqués de façon identique aux cinq coupes, aux six canaux et au label. Le
+gamma, le bruit gaussien et le champ de biais multiplicatif concernent seulement
+T1 et T2. Les coordonnées et le masque ne reçoivent aucune augmentation
+d'intensité.
 
-Cette mesure suit une distribution continue plutôt qu'un simple partage
-vide/non-vide : le nombre de tranches conservées chute très vite dès les
-premiers seuils, avant de se stabiliser. Sur le même ensemble
-d'entraînement :
+\subsection{Métriques}
 
-\begin{center}
-\begin{tabular}{lccccccc}
+Le Dice d'une classe $c$ est calculé sur le volume reconstruit :
+\begin{equation}
+  \operatorname{Dice}_c =
+  \frac{2\lvert P_c \cap G_c\rvert}
+       {\lvert P_c\rvert + \lvert G_c\rvert}.
+\end{equation}
+Les Dice sont calculés séparément pour chaque sujet, puis moyennés sur les
+sujets et sur les trois classes de tissu. Le fond est exclu. La distance de
+Hausdorff au 95e percentile (HD95) et la distance moyenne de surface (ASD)
+complètent l'évaluation du modèle final.
+
+\section{Architecture proposée}
+
+\subsection{Motivation du choix 2.5D}
+
+Le choix 2.5D repose sur le champ de vision disponible dans une coupe complète.
+Chaque prédiction observe la position globale du voxel dans un plan à pleine
+résolution, alors qu'un entraînement 3D par patchs limite ce contexte à la taille
+du patch. Les cinq coupes apportent une information locale dans la troisième
+dimension et les trois canaux de coordonnées explicitent la position dans le
+volume. Cette combinaison est adaptée à la phase isointense, où l'apparence
+locale seule sépare difficilement la GM de la WM.
+
+Un U-Net 3D à blocs factorisés $(2+1)$D constituerait un concurrent direct et
+raisonnable en calcul. Cette comparaison n'a pas pu être exécutée dans le temps
+disponible. Les résultats présentés évaluent donc l'intérêt du 2.5D face aux
+baselines 2D, sans conclure à sa supériorité sur une architecture 3D compacte.
+
+\subsection{Vue d'ensemble}
+
+Rep-SliceMix-Net traite une coupe entière à sa résolution native. Cinq coupes
+voisines fournissent le contexte hors plan, sans recourir à des patchs 3D. Le
+réseau partage ses convolutions entre les orientations et reçoit l'identité du
+plan sous la forme d'un entier. Les largeurs sont $[24,48,96,192]$ et les
+profondeurs $[2,2,2,1]$.
+
+\begin{table}[htbp]
+\centering
+\small
+\caption{Organisation de Rep-SliceMix-Net. $S$ désigne le nombre de coupes
+encore présentes dans l'encodeur.}
+\label{tab:architecture}
+\begin{tabularx}{\textwidth}{@{}lclY@{}}
 \toprule
-Seuil minimal de tissu & 0 & 0{,}01 & 0{,}05 & 0{,}1 & 0{,}17 & 0{,}2 & 0{,}3 \\
+Partie & Sortie & Canaux & Opération principale \\
 \midrule
-Tranches conservées & 2560 & 953 & 783 & 631 & 353 & 61 & 0 \\
-Part du total & 100~\% & 37~\% & 31~\% & 25~\% & 14~\% & 2~\% & 0~\% \\
+Branche centrale & $H\times W$ & 16 & Conv2d $3\times3$ sur la coupe centrale \\
+Stem & $5\times H/2\times W/2$ & 24 & Conv3d $1\times3\times3$ \\
+Stage 1 & $S=5$ & 24 & 2 RepSliceMix, FiLM, SlicePool \\
+Transition 1 & $S=3$ & 48 & Conv3d $3\times1\times1$, stride spatial 2 \\
+Stage 2 & $S=3$ & 48 & 2 RepSliceMix, FiLM, SlicePool \\
+Transition 2 & $S=1$ & 96 & Conv3d $3\times1\times1$, stride spatial 2 \\
+Stage 3 & $S=1$ & 96 & 2 RepSliceMix, FiLM, squeeze \\
+Bottleneck & $H/16\times W/16$ & 192 & 1 bloc 2D \\
+Décodeur & $H\times W$ & $96,48,24,16$ & Upsampling bilinéaire et skips 2D \\
+Tête & $H\times W$ & 4 & Conv2d $1\times1$ \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+La branche centrale 2D travaille directement à pleine résolution et fournit le
+premier skip du décodeur. Elle préserve les contours fins, notamment ceux du
+CSF, sans multiplier ce calcul par les cinq coupes. Le stem principal réduit la
+résolution dans le plan. Les deux premières transitions réduisent ensuite la
+dimension des coupes de $5$ à $3$, puis de $3$ à $1$, grâce à des convolutions
+valides $3\times1\times1$. Après cette réduction, le bottleneck et le décodeur
+sont entièrement 2D.
+
+\subsection{Bloc RepSliceMix}
+
+Pour une entrée $x\in\mathbb{R}^{B\times C\times S\times H\times W}$, un bloc
+effectue successivement :
+\begin{align}
+  u &= \operatorname{GELU}(\operatorname{RepDW}_{1\times3\times3}(x)),\\
+  v &= \operatorname{GELU}(\operatorname{RepDW}_{3\times1\times1}(u)),\\
+  m &= \operatorname{Conv}_{1\times1\times1}^{2C\rightarrow C}
+       \left(\operatorname{GELU}
+       \left(\operatorname{Conv}_{1\times1\times1}^{C\rightarrow2C}(v)\right)
+       \right),\\
+  y &= x + \lambda\odot\operatorname{BN}(m).
+\end{align}
+La seconde ligne est omise lorsque $S=1$. Le paramètre de couche $\lambda$ est
+appris par canal et initialisé à $10^{-2}$.
+
+La factorisation distingue les relations dans le plan et entre les coupes. Une
+convolution 3D dense $3\times3\times3$ de $C$ vers $C$ contient
+approximativement $27C^2$ poids. Les deux convolutions par canal utilisées ici
+en contiennent $12C$, auxquelles s'ajoutent environ $4C^2$ poids pour le mélange
+de canaux. Les activations intermédiaires conservent deux transformations non
+linéaires successives et réduisent fortement le coût par rapport à un noyau 3D
+dense.
+
+\subsection{Partage tri-plan}
+
+Les mêmes poids convolutifs traitent les plans axial, coronal et sagittal. Une
+modulation FiLM \cite{perez2018film} est appliquée à la fin de chaque stage :
+\begin{equation}
+  \operatorname{FiLM}(x,p) = \gamma_p\odot x + \beta_p,
+\end{equation}
+où $p$ est le plan et où $\gamma_p,\beta_p\in\mathbb{R}^{C}$ proviennent d'un
+embedding appris. Les skips 3D sont ramenés en 2D par une somme pondérée des
+coupes. Les poids de cette opération, appelée SlicePool, dépendent du plan et
+du canal. Ce conditionnement permet de tenir compte des orientations
+anatomiques tout en conservant un seul encodeur.
+
+À l'inférence, chaque plan produit un volume de probabilités dans son propre
+repère. Ces volumes sont réorientés dans le repère canonique puis moyennés avant
+l'argmax. La fusion tardive ne modifie pas le nombre de paramètres, mais son
+coût croît avec le nombre de vues.
+
+\subsection{Reparamétrisation pour le déploiement}
+
+Pendant l'entraînement, chaque RepDW additionne une branche avec le noyau
+principal, une branche $1\times1$ et une branche identité. Chaque branche
+possède sa propre normalisation par batch. Suivant RepVGG \cite{ding2021repvgg}
+et Diverse Branch Block \cite{ding2021dbb}, les convolutions et leurs
+normalisations sont fusionnées algébriquement. Le noyau $1\times1$ et le noyau
+identité sont centrés dans le noyau principal, puis les poids et biais des trois
+branches sont additionnés.
+
+Cette transformation ramène chaque RepDW à une seule convolution par canal avec
+biais. Les convolutions spatiale et inter-coupes restent distinctes car un GELU
+les sépare. Un test unitaire compare les sorties avant et après fusion en mode
+évaluation et impose une erreur absolue maximale inférieure à $10^{-4}$. Le
+nombre de paramètres passe de 548~516 pendant l'entraînement à 543~380 au
+déploiement. La réduction, proche de 0,94~\%, est modeste. L'intérêt principal
+est de retirer les branches auxiliaires du graphe d'inférence. En précision
+FP32, les poids déployés occupent environ 2,17~Mo, hors métadonnées du fichier.
+
+\section{Entraînement et inférence}
+
+La fonction de coût combine Dice différentiable, entropie croisée et terme de
+frontière :
+\begin{equation}
+  \mathcal{L}=0{,}6\,\mathcal{L}_{Dice}
+  +0{,}3\,\mathcal{L}_{CE}
+  +0{,}1\,\mathcal{L}_{BoundaryCE}.
+\end{equation}
+Le Dice est moyenné sur CSF, GM et WM. Le terme de frontière multiplie
+l'entropie croisée par 3 pour les pixels situés à moins de deux pixels d'une
+interface, et par 1 ailleurs. Il vise directement les interfaces GM/WM, peu
+contrastées sur les images.
+
+\begin{table}[htbp]
+\centering
+\small
+\caption{Configuration de l'entraînement B0.}
+\label{tab:training}
+\begin{tabular}{@{}ll@{}}
+\toprule
+Élément & Valeur \\
+\midrule
+Optimiseur & AdamW, learning rate $3\times10^{-4}$, weight decay $10^{-4}$ \\
+Schedule & warmup linéaire 5~\%, puis décroissance cosinus \\
+Durée & 200 epochs, 250 itérations par epoch \\
+Batch & 16 \\
+Précision & AMP FP16, gradient clipping à 1,0 \\
+EMA & decay 0,999 \\
+Validation & axiale toutes les 5 epochs, tri-plan toutes les 10 epochs \\
+Sélection & meilleur Dice volumique tri-plan avec les poids EMA \\
 \bottomrule
 \end{tabular}
-\end{center}
+\end{table}
 
-Ce mécanisme de filtrage a été expérimenté dans le notebook d'exploration,
-qui permet de visualiser cette distribution globalement et par sujet, et
-servira de base pour comparer l'effet du retrait des tranches vides (voire
-peu remplies) sur l'entraînement du modèle de segmentation.
+Les normalisations, biais, paramètres de couche et embeddings sont exclus du
+weight decay. Le run B0 a effectué 50~000 itérations sans arrêt anticipé. Son
+meilleur checkpoint est celui de l'epoch 200. Six workers persistants,
+l'optimiseur AdamW fusionné et une mise à jour EMA groupée réduisent le temps
+mesuré de 182,71 à 163,64~ms par itération, soit un gain de 11,7~\% à loss et
+mémoire identiques. BF16 s'est montré 27~\% plus lent sur la RTX 5070 Ti.
+\texttt{torch.compile} a été écarté en raison des recompilations associées aux
+formes variables. Le run complet B0 a duré environ 2,66 heures.
 
-\section{Réduction du fond : crop à la bounding box du cerveau}
+\section{Expériences}
 
-Le problème des tranches vides identifié ci-dessus n'est qu'un symptôme
-d'un problème plus large : le dataset iSeg-2017 étant déjà
-\emph{skull-strippé}, le fond hors du cerveau vaut exactement 0 sur les deux
-modalités T1 et T2, sur un champ de vue nettement plus grand que le cerveau
-lui-même (volume $144 \times 192 \times 256$ par sujet). Même les tranches
-non vides contiennent donc une large marge de fond qui n'apporte aucune
-information utile au modèle.
+\subsection{Baselines}
 
-\subsection{Vérification empirique}
+Le U-Net \cite{ronneberger2015unet} compact utilise uniquement la coupe
+centrale. Il reçoit les mêmes six canaux, le même prétraitement, le même fold,
+la même fonction de coût et le même sampler de plans. Il contient 99~578
+paramètres. Cette configuration permet une comparaison appariée à budget
+d'entraînement identique jusqu'à l'epoch 90. Son run s'arrête à l'epoch 94 ; il
+sert de baseline contrôlée et non de résultat à convergence garantie.
 
-Sur les 10 sujets d'entraînement, le masque d'intensité obtenu par simple
-seuillage ($T1 > 0$ ou $T2 > 0$) est \textbf{identique voxel à voxel} au
-masque de fond du label ($\text{label} \neq 0$), sans une seule exception.
-Un simple seuillage d'intensité suffit donc, sur ce dataset, à isoler
-exactement le cerveau, sans risque de perte de tissu réel.
+nnU-Net v2 \cite{isensee2021nnunet} constitue la seconde baseline. Le planner a
+sélectionné un PlainConvUNet 2D à six niveaux, avec des patchs $160\times128$,
+un batch de 41 et 20~621~364 paramètres. Il utilise T1 et T2, son prétraitement
+automatique et le même partage de sujets pour le fold 0. Le run a été interrompu
+vers l'epoch 667 après environ 200 epochs sans amélioration du meilleur EMA
+pseudo-Dice. Le meilleur checkpoint, enregistré à l'epoch 443, possède un EMA
+pseudo-Dice de 0,90691. Ce plateau prolongé permet de considérer la baseline
+comme convergée pour cette expérience. Le pseudo-Dice nnU-Net est calculé en
+ligne sur les patchs de validation et ne suit pas exactement notre agrégation
+volumique tri-plan. Il est donc rapporté séparément.
 
-\subsection{Implémentation}
+\subsection{Ablations}
 
-Pour chaque sujet, une bounding box 3D est calculée à partir de l'union des
-voxels non nuls de T1 et T2, avec une marge de sécurité de 4 voxels
-(tolérance pour un sujet légèrement atypique, en particulier les sujets du
-split test qui n'ont pas de label pour vérifier la bbox directement). Comme
-chaque sujet a une bbox de taille différente, une taille de canvas commune
-à toute la cohorte est ensuite imposée --- le maximum des tailles
-individuelles, arrondi au multiple de 8 supérieur pour rester compatible
-avec la profondeur (\texttt{depth=3}) du \texttt{CompactUNet}. Sur les 10
-sujets d'entraînement, le canvas passe ainsi de $256\times256$ à
-$160\times160$, et le nombre de tranches par sujet est quasiment divisé par
-deux (les tranches entièrement vides en bord de volume étant éliminées par
-le crop).
+Les modifications sont testées séparément avec la même graine et le même
+horizon de scheduler. Les screenings à 30, 50 ou 100 epochs réduisent le coût
+des variantes défavorables tout en gardant les points de comparaison de B0.
 
-\subsection{Impact sur l'entraînement}
-
-Une comparaison contrôlée (même seed, mêmes hyperparamètres ---
-\texttt{base\_channels=16}, \texttt{depth=3}, \texttt{lr=1e-3},
-\texttt{batch\_size=16}, 10 epochs, même split validation) entre le
-pipeline actuel et l'entrée cropée donne :
-
-\begin{center}
-\begin{tabular}{lcc}
+\begin{table}[htbp]
+\centering
+\small
+\caption{Ablations d'architecture et d'échantillonnage sur le fold 0. Les
+paramètres correspondent au modèle déployé.}
+\label{tab:ablations}
+\begin{tabularx}{\textwidth}{@{}lYrrrr@{}}
 \toprule
- & sans crop & avec crop \\
+Variante & Modification & Paramètres & e30 & e50 & e100 \\
 \midrule
-Canvas & $256\times256$ & $160\times160$ \\
-Tranches (train / val) & 2048 / 512 & 874 / 216 \\
-Dice moyen (fg), meilleure epoch & 0,822 (epoch 9) & 0,841 (epoch 7) \\
-Temps moyen par epoch & $\sim$110~s & $\sim$14~s \\
+B0 & Référence, 75~\% de $d=1$ & 543~380 & 0,90844 & 0,91537 & 0,92097 \\
+B1 & Noyau reparamétrable $7\times7$ au bottleneck & 551~060 & 0,90834 & 0,91420 & -- \\
+B2 & Supervision profonde & 543~380 & 0,89723 & -- & -- \\
+B4 & Deux blocs au bottleneck & 693~908 & 0,89248 & 0,91428 & -- \\
+B5 & $d=1$ uniquement & 543~380 & 0,90732 & 0,91717 & \textbf{0,92242} \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+B1 ne justifie pas ses paramètres supplémentaires. B2 dégrade le Dice moyen de
+0,01121 à l'epoch 30, principalement sur la WM. B4 ajoute 28~\% de paramètres
+et reste légèrement sous B0 à l'epoch 50. Ces variantes n'ont pas été
+prolongées. B5 améliore B0 de 0,00145 à l'epoch 100, avec un gain sur les trois
+classes et les deux sujets. Cet écart demeure inférieur au seuil de 0,002 fixé
+pour conclure sur un seul fold. B5 reste donc une piste à confirmer sur un
+second fold plutôt qu'une nouvelle référence.
+
+\subsubsection{Apport des canaux de position}
+
+Une ablation supplémentaire isole l'apport des trois coordonnées normalisées.
+Les variantes D0 et D0$'$ utilisent uniquement le plan axial et désactivent
+FiLM afin de ne pas confondre l'effet du repère spatial avec celui du
+conditionnement ou de la fusion tri-plan. D0 reçoit T1, T2, les coordonnées
+$x$, $y$, $z$ et le masque cérébral. D0$'$ conserve T1, T2 et le masque, mais
+retire les trois coordonnées. Le split, la graine, le prétraitement, les
+augmentations, la fonction de coût et le calendrier d'apprentissage sont
+identiques.
+
+\begin{table}[htbp]
+\centering
+\small
+\caption{Ablation des canaux de position à l'epoch 35 sur le fold 0. La
+validation est volumique et axiale, sans FiLM.}
+\label{tab:coordinates}
+\begin{tabular}{@{}llrrrr@{}}
+\toprule
+Variante & Coordonnées & CSF & GM & WM & Moyenne \\
+\midrule
+D0 & incluses & 0,93824 & 0,89709 & 0,87488 & 0,90341 \\
+D0$'$ & exclues & 0,93867 & 0,88643 & 0,83872 & 0,88794 \\
+\midrule
+$\Delta$ D0 $-$ D0$'$ & & $-0{,}00042$ & $+0{,}01067$ & $+0{,}03617$ & \textbf{$+0{,}01547$} \\
 \bottomrule
 \end{tabular}
-\end{center}
+\end{table}
+\FloatBarrier
 
-Le crop apporte un gain de vitesse d'environ $7{,}6\times$ par epoch,
-cohérent avec la réduction du nombre de pixels traités (canvas divisé par
-$\sim$2,6, nombre de tranches par sujet divisé par $\sim$2), ainsi qu'un
-léger gain de Dice ($+0{,}019$ sur la meilleure epoch, plus net sur la
-substance blanche) --- un seul run par condition, donc pas une preuve de
-significativité statistique, mais cohérent avec l'hypothèse que retirer le
-fond trivial concentre le gradient sur les vraies frontières de tissu.
+Le gain apparaît sur les deux sujets de validation, avec +0,01480 pour
+iSeg\_001 et +0,01614 pour iSeg\_008. Il concerne principalement la GM et la
+WM, tandis que le CSF reste inchangé. Les modèles déployés contiennent
+respectivement 542~372 et 541~292 paramètres. Le surcoût des coordonnées est
+donc de 1~080 paramètres, soit environ 0,2~\% de la taille du modèle.
 
-\paragraph{Mise en garde sur les valeurs de \texttt{train\_loss}/\texttt{val\_loss}.}
-Ces deux quantités ne sont pas comparables entre les deux runs.
-\texttt{nn.CrossEntropyLoss()} moyenne la perte par pixel, pas par classe :
-sans crop, 95,2~\% des pixels sont du fond, contre 71,4~\% avec crop (mesuré
-via \texttt{BrainSliceDataset.foreground\_ratio}). Le fond étant la classe
-la plus facile (Dice $\approx 1{,}0000$ dès l'epoch 5 dans les deux runs),
-sa contribution quasi nulle à la perte tire d'autant plus la moyenne vers le
-bas que sa part de pixels est grande --- ce qui explique la perte plus
-faible observée sans crop (0,022 contre 0,116 à l'epoch 9), sans que le
-modèle soit pour autant meilleur. C'est un piège méthodologique classique
-des métriques moyennées par pixel sous fort déséquilibre de classe : le
-Dice foreground, moyenné par classe et non par pixel, reste la métrique
-valide pour comparer les deux runs.
+Une erreur de précision FP16 dans le chemin de validation sur ROCm a invalidé
+les mesures D0 des epochs 5 à 30. Elle n'a pas affecté l'optimisation et a été
+corrigée avant la validation à l'epoch 35. D0$'$ a été exécuté entièrement avec
+le chemin corrigé. L'epoch 35 constitue ainsi le seul point apparié exploitable.
+Cette observation soutient la conservation du repère spatial, mais reste
+préliminaire. Les valeurs absolues de D0 et D0$'$ ne sont pas directement
+comparables à B0, évalué avec FiLM et la fusion tri-plan.
 
-\subsection{Overhead du crop à l'inférence}
+\subsection{Choix du fold unique}
 
-Le gain observé à l'entraînement s'explique en bonne partie par
-l'amortissement du coût de calcul de la bbox --- effectué une seule fois, à
-la construction du dataset --- sur de nombreux batches et epochs. À
-l'inférence, un seul passage \emph{forward} par sujet, la question se pose
-différemment : l'overhead de calcul de la bbox est-il compensé par le gain
-d'un forward pass plus petit ?
+Une validation croisée à cinq folds fournirait une estimation plus stable et
+des intervalles de variabilité entre sujets. Son coût d'entraînement est presque
+linéaire avec le nombre de folds. Quatre entraînements B0 supplémentaires
+représentent environ 10,7 heures, auxquels s'ajoutent les baselines et les
+ablations. Le budget total aurait alors dépassé 20 heures de calcul local.
 
-Une mesure directe sur un sujet (CPU, \texttt{CompactUNet} en mode
-évaluation, \texttt{torch.no\_grad()}) isole le coût partagé (chargement
-des volumes, identique dans les deux cas), l'overhead spécifique au crop
-(seuillage et calcul de bbox) et le coût du forward pass :
+Le fold 0 fixe les données, la graine et les epochs de comparaison afin de
+favoriser des décisions appariées rapides. Cette stratégie augmente le nombre
+d'hypothèses examinées dans le temps disponible. Elle expose toutefois les
+résultats à la variabilité des deux sujets de validation et à une adaptation
+progressive des décisions à ce fold. Une validation croisée complète reste la
+prochaine étape nécessaire pour estimer la généralisation.
 
-\begin{center}
-\begin{tabular}{lr}
+\section{Résultats}
+
+\subsection{Résultat principal}
+
+Le meilleur checkpoint B0 se situe à la dernière validation, à l'epoch 200.
+Les deux sujets obtiennent des Dice moyens de 0,92123 et 0,92481.
+
+\begin{table}[htbp]
+\centering
+\caption{Résultats volumiques du modèle B0 sur le fold 0.}
+\label{tab:main-results}
+\begin{tabular}{@{}lrrr@{}}
 \toprule
-Étape & Temps \\
+Classe & Dice $\uparrow$ & HD95 $\downarrow$ & ASD $\downarrow$ \\
 \midrule
-Chargement T1+T2 (partagé) & 0,4~ms \\
-Overhead crop --- seuillage + bbox & 27,9~ms \\
-Overhead crop --- découpe & $<$0,1~ms \\
-Forward pass sans crop (256×256, 256 tranches) & 4623~ms \\
-Forward pass avec crop (160×160, 115 tranches) & 569~ms \\
+CSF & 0,95388 & 1,00 mm & 0,1316 mm \\
+GM  & 0,91830 & 1,00 mm & 0,3399 mm \\
+WM  & 0,89686 & 1,00 mm & 0,3853 mm \\
+\midrule
+Moyenne Dice & \textbf{0,92302} & & \\
 \bottomrule
 \end{tabular}
-\end{center}
+\end{table}
 
-L'overhead total du crop (environ 28~ms) ne représente que 0,7~\% du gain
-apporté sur le forward pass (environ 4055~ms) : il est largement compensé.
-Le speedup net à l'inférence sur un sujet (overhead compris) est d'environ
-$7{,}75\times$, quasiment identique au $\times7{,}6$ observé par epoch à
-l'entraînement --- signe que le déséquilibre de coût entre un seuillage
-numpy vectorisé sur des voxels et un réseau de convolutions sur des pixels
-est structurel, indépendant du nombre de répétitions.
+La GM atteint 0,91830 et la WM 0,89686. Les ASD restent inférieures à 0,4~mm
+pour chaque tissu. La progression de B0 ralentit
+après l'epoch 100, mais passe encore de 0,92097 à 0,92302 entre les epochs 100
+et 200.
 
-Pour une inférence réelle sur le split test (sans label), il restera à
-replacer la prédiction dans le repère du volume d'origine (padding inverse
-de la bbox vers la forme d'origine) afin de l'exporter ou de l'évaluer ---
-une opération d'un coût du même ordre de grandeur négligeable que la
-découpe elle-même.
+\subsection{Comparaison aux baselines locales}
+
+\begin{table}[htbp]
+\centering
+\small
+\caption{Comparaison appariée à l'epoch 90 sur le fold 0.}
+\label{tab:compact-comparison}
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+Modèle & Paramètres & CSF & GM & WM & Moyenne \\
+\midrule
+U-Net 2D compact & 99~578 & 0,93815 & 0,89393 & 0,86120 & 0,89776 \\
+Rep-SliceMix B0 & 543~380 & \textbf{0,95241} & \textbf{0,91563} & \textbf{0,89303} & \textbf{0,92036} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Rep-SliceMix améliore la moyenne de 0,02260, dont 0,02170 sur la GM et 0,03183
+sur la WM. Ce gain est important pour une application où la qualité des
+interfaces entre tissus conditionne directement les mesures produites à partir
+de la segmentation. Il motive un budget de capacité supérieur à celui du U-Net
+minimal.
+
+Le facteur 5,46 entre les deux nombres de paramètres provient du budget très
+réduit de la baseline. En valeur absolue, Rep-SliceMix reste sous le million de
+paramètres avec 543~380 paramètres déployés, soit environ 2,17~Mo en FP32.
+L'augmentation de capacité reste donc compatible avec un déploiement léger et
+s'accompagne d'un gain marqué sur la GM et la WM. Ce compromis privilégie la
+qualité de segmentation tout en conservant un réseau compact.
+
+Rep-SliceMix utilise seulement 2,6~\% des paramètres du nnU-Net 2D planifié, soit
+un facteur de réduction proche de 38. Le meilleur pseudo-Dice EMA de nnU-Net,
+0,90691, a été suivi d'environ 200 epochs sans amélioration. Cette baseline est
+considérée comme stabilisée. La différence de protocole métrique interdit de
+convertir l'écart avec 0,92302 en gain direct. Les deux résultats indiquent
+qu'un réseau sous le million de paramètres peut atteindre une précision locale
+du même ordre qu'une baseline auto-configurée beaucoup plus grande.
+
+\subsection{Coût de l'inférence multi-plan}
+
+\begin{table}[htbp]
+\centering
+\small
+\caption{Compromis entre nombre de vues, Dice et latence. Les temps sont
+indicatifs et mesurés sur une RTX 5070 Ti.}
+\label{tab:tta}
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+Configuration & Vues & Dice moyen & Temps par volume \\
+\midrule
+Axial, $d=1$ & 1 & 0,89966 & 0,957 s \\
+Sagittal, $d=1$ & 1 & 0,91389 & 0,651 s \\
+Coronal + sagittal, $d=1$ & 2 & 0,92269 & 1,605 s \\
+Tri-plan, $d=1$ & 3 & \textbf{0,92302} & 2,562 s \\
+Tri-plan, $d=1$ et $d=2$ & 6 & 0,92308 & 4,829 s \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Le passage de l'axial seul au tri-plan apporte 0,02335 de Dice. Les plans
+coronal et sagittal réunis conservent presque tout ce gain, avec un écart de
+0,00033 et une vue de moins. Ajouter les prédictions à $d=2$ double le nombre
+de vues pour un gain de 0,00007. Le tri-plan à $d=1$ reste la configuration de
+qualité de référence. Le couple coronal et sagittal constitue le mode efficace
+si la latence est prise en compte.
+
+\subsection{Analyse qualitative}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{segmentation_examples.png}
+  \caption{Exemples de segmentation sur le sujet de validation iSeg\_001. Les
+  colonnes montrent l'image T1, la vérité terrain, la prédiction, leur
+  superposition et les erreurs. Les trois lignes correspondent à des positions
+  axiales distinctes. Les erreurs se concentrent principalement sur les
+  interfaces fines entre GM et WM.}
+  \label{fig:qualitative}
+\end{figure}
+
+La figure~\ref{fig:qualitative} montre une segmentation spatialement cohérente
+sur des coupes de morphologies différentes. Les structures principales sont
+préservées et les erreurs forment surtout des bandes minces aux interfaces de
+tissus. Cette observation est cohérente avec une HD95 de 1~mm et avec la
+difficulté du contraste GM/WM.
+
+\subsection{Repère fourni par le classement iSeg}
+
+Le Tableau~\ref{tab:leaderboard} place le résultat local sur l'échelle des
+meilleurs résultats publiés sur le site iSeg. HUST-CBIB est la meilleure entrée
+actuellement affichée. MSL\_SKKU et LIVIA correspondent aux meilleures valeurs
+du classement initial de 2017 \cite{isegresults}.
+
+\begin{table}[htbp]
+\centering
+\small
+\caption{Comparaison numérique avec le classement public iSeg. Les équipes
+officielles sont évaluées sur les 13 sujets de test cachés. B0 est évalué sur
+deux sujets locaux et ne possède donc pas de rang officiel.}
+\label{tab:leaderboard}
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+Méthode & WM & GM & CSF & Moyenne simple \\
+\midrule
+HUST-CBIB, test officiel & \textbf{0,906} & \textbf{0,925} & \textbf{0,960} & \textbf{0,93033} \\
+MSL\_SKKU, test officiel & 0,901 & 0,919 & 0,958 & 0,92600 \\
+LIVIA, test officiel & 0,897 & 0,919 & 0,957 & 0,92433 \\
+Rep-SliceMix B0, fold local & 0,89686 & 0,91830 & 0,95388 & 0,92302 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+La valeur numérique moyenne de B0 représente 99,2~\% de celle de HUST-CBIB et
+99,7~\% de celle de MSL\_SKKU. Pour la GM, ces rapports atteignent respectivement
+99,3~\% et 99,9~\%. Ils donnent un repère d'échelle, sans mesurer une fraction de
+performance conservée : les cohortes et le protocole de sélection diffèrent.
+Une comparaison valide avec le classement demanderait les annotations des
+sujets 11 à 23, qui ne sont pas disponibles dans les données fournies. Le
+classement ne fournit pas le nombre de paramètres des méthodes, ce qui empêche
+une comparaison quantitative de leur compacité.
+
+\section{Discussion}
+
+Les résultats appariés soutiennent l'utilité du contexte 2.5D. Face au U-Net
+compact, les gains les plus élevés concernent la WM et la GM, les deux classes
+pour lesquelles le contraste local est le moins informatif. La différence entre
+l'axial seul et les vues coronal et sagittal confirme également que le contexte
+anatomique dépend de l'orientation. Le partage des poids permet d'exploiter ces
+vues sans tripler la taille du réseau. L'ablation D0/D0$'$ indique en outre que
+les coordonnées explicites améliorent surtout la GM et la WM. Le contexte
+visuel et le repère spatial apportent ainsi des informations complémentaires
+dans le protocole étudié.
+
+La factorisation des convolutions explique en grande partie la compacité du
+modèle. Le mélange inter-coupes est effectué seulement aux résolutions où
+plusieurs coupes sont encore présentes. Les couches profondes et le décodeur
+restent 2D. Cette organisation aboutit à 543~380 paramètres déployés et à une
+inférence tri-plan mesurée autour de 2,6 secondes par volume. Lorsque le coût
+est prioritaire, deux vues donnent un Dice presque identique autour de 1,6
+seconde.
+
+La reparamétrisation apporte peu de réduction de paramètres et son gain de
+latence est marginal sur ce réseau. Elle garantit toutefois un graphe déployé
+plus simple tout en autorisant plusieurs branches normalisées pendant
+l'entraînement. Les ablations indiquent que l'augmentation du noyau ou de la
+profondeur du bottleneck n'améliore pas la trajectoire de B0. La capacité brute
+du bottleneck ne semble donc pas constituer la limite principale dans le régime
+étudié. La supervision profonde testée pénalise nettement la WM, probablement
+parce que les sorties basse résolution représentent mal ses interfaces fines.
+
+L'étude possède trois limites principales. Premièrement, les résultats de
+Rep-SliceMix et du U-Net compact proviennent d'un seul fold. Deuxièmement,
+plusieurs choix ont été effectués à partir des mêmes deux sujets, ce qui peut
+favoriser le fold 0. L'ablation des coordonnées ne dispose par ailleurs que
+d'un point apparié valide. Troisièmement, aucun Dice local n'est disponible sur
+le test officiel. Les écarts inférieurs à 0,002, comme celui de B5 ou des
+variantes TTA à six vues, restent donc indécis. Une validation croisée à cinq
+folds fournirait l'évaluation finale appropriée. Un modèle destiné à la
+livraison pourrait ensuite être réentraîné sur les dix sujets annotés.
+
+\section{Conclusion}
+
+Rep-SliceMix-Net atteint un Dice moyen de 0,92302 sur le fold étudié, avec
+0,91830 sur la GM et 0,89686 sur la WM pour 543~380 paramètres déployés. La
+fusion tri-plan apporte 0,02335 face à l'inférence axiale, sans augmenter la
+taille du réseau. Le modèle reste sous le million de paramètres et utilise
+environ 2,6~\% des paramètres de la baseline nnU-Net 2D planifiée. Les ablations
+ont conduit à conserver une architecture simple : un seul bottleneck, aucune
+supervision profonde, les canaux de position et une inférence tri-plan à
+$d=1$. Le résultat se situe numériquement près des meilleures valeurs du
+classement iSeg, mais sa portée demeure locale en l'absence d'une validation
+croisée complète et des annotations du jeu de test.
+
+\begin{thebibliography}{9}
+
+\bibitem{wang2019iseg}
+L. Wang et al.,
+``Benchmark on Automatic 6-month-old Infant Brain Segmentation Algorithms:
+The iSeg-2017 Challenge,''
+\textit{IEEE Transactions on Medical Imaging}, vol. 38, no. 9,
+pp. 2219--2230, 2019,
+\href{https://doi.org/10.1109/TMI.2019.2901712}{doi:10.1109/TMI.2019.2901712}.
+
+\bibitem{perez2018film}
+E. Perez, F. Strub, H. de Vries, V. Dumoulin et A. Courville,
+``FiLM: Visual Reasoning with a General Conditioning Layer,''
+\textit{Proceedings of the AAAI Conference on Artificial Intelligence},
+vol. 32, no. 1, pp. 3942--3951, 2018,
+\href{https://doi.org/10.1609/aaai.v32i1.11671}
+{doi:10.1609/aaai.v32i1.11671}.
+
+\bibitem{ding2021repvgg}
+X. Ding, X. Zhang, N. Ma, J. Han, G. Ding et J. Sun,
+``RepVGG: Making VGG-Style ConvNets Great Again,''
+\textit{Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition}, pp. 13733--13742, 2021,
+\href{https://openaccess.thecvf.com/content/CVPR2021/html/Ding_RepVGG_Making_VGG-Style_ConvNets_Great_Again_CVPR_2021_paper.html}
+{CVF Open Access}.
+
+\bibitem{ding2021dbb}
+X. Ding, X. Zhang, J. Han et G. Ding,
+``Diverse Branch Block: Building a Convolution as an Inception-Like Unit,''
+\textit{Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition}, pp. 10886--10895, 2021,
+\href{https://openaccess.thecvf.com/content/CVPR2021/html/Ding_Diverse_Branch_Block_Building_a_Convolution_as_an_Inception-Like_Unit_CVPR_2021_paper.html}
+{CVF Open Access}.
+
+\bibitem{ronneberger2015unet}
+O. Ronneberger, P. Fischer et T. Brox,
+``U-Net: Convolutional Networks for Biomedical Image Segmentation,''
+dans \textit{Medical Image Computing and Computer-Assisted Intervention},
+Lecture Notes in Computer Science, vol. 9351, pp. 234--241, 2015,
+\href{https://doi.org/10.1007/978-3-319-24574-4_28}
+{doi:10.1007/978-3-319-24574-4\_28}.
+
+\bibitem{isensee2021nnunet}
+F. Isensee, P. F. Jaeger, S. A. A. Kohl, J. Petersen et K. H. Maier-Hein,
+``nnU-Net: a self-configuring method for deep learning-based biomedical image
+segmentation,''
+\textit{Nature Methods}, vol. 18, pp. 203--211, 2021,
+\href{https://doi.org/10.1038/s41592-020-01008-z}
+{doi:10.1038/s41592-020-01008-z}.
+
+\bibitem{isegresults}
+iSeg-2017,
+``Evaluation \& Results,''
+\href{https://iseg2017.web.unc.edu/rules/results/}{site officiel iSeg-2017},
+consulté le 5 septembre 2026.
+
+\end{thebibliography}
 
 \end{document}
