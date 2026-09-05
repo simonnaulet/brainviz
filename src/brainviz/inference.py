@@ -33,12 +33,16 @@ def predict_preprocessed(
     batch_size: int = 16,
     device: str | torch.device = "cuda",
     amp: bool = True,
+    amp_dtype: str = "float16",
 ) -> tuple[np.ndarray, dict]:
     """Retourne les probabilités `[4,X,Y,Z]` moyennées sur les vues demandées.
 
     Une vue est un couple ``(plan, espacement inter-coupes)``. Le comportement
     historique correspond à ``slice_spacings=(1,)``.
     """
+    if amp_dtype not in {"float16", "bfloat16"}:
+        raise ValueError("amp_dtype doit valoir 'float16' ou 'bfloat16'")
+    torch_amp_dtype = torch.float16 if amp_dtype == "float16" else torch.bfloat16
     with np.load(subject_path, allow_pickle=False) as archive:
         item = {key: archive[key] for key in archive.files if key != "metadata"}
         metadata = json.loads(str(archive["metadata"]))
@@ -64,7 +68,7 @@ def predict_preprocessed(
                 stacks = [oriented[:, np.clip(center + offsets, 0, oriented.shape[1] - 1)] for center in centers]
                 x = torch.from_numpy(np.ascontiguousarray(np.stack(stacks))).float().to(device)
                 p = torch.full((len(stacks),), plane, dtype=torch.long, device=device)
-                with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=amp and device.type == "cuda"):
+                with torch.autocast(device_type=device.type, dtype=torch_amp_dtype, enabled=amp and device.type == "cuda"):
                     probabilities = model(x, p).softmax(dim=1)
                 results.append(probabilities.float().cpu().numpy())
             # [S,C,H,W] -> [C,S,H,W] -> [C,X,Y,Z]
@@ -106,8 +110,12 @@ def predict_preprocessed_3d(
     overlap: float = 0.5,
     device: str | torch.device = "cuda",
     amp: bool = True,
+    amp_dtype: str = "float16",
 ) -> tuple[np.ndarray, dict]:
     """Sliding-window du concurrent 3D, sortie `[4,X,Y,Z]`."""
+    if amp_dtype not in {"float16", "bfloat16"}:
+        raise ValueError("amp_dtype doit valoir 'float16' ou 'bfloat16'")
+    torch_amp_dtype = torch.float16 if amp_dtype == "float16" else torch.bfloat16
     with np.load(subject_path, allow_pickle=False) as archive:
         item = {key: archive[key] for key in archive.files if key != "metadata"}
         metadata = json.loads(str(archive["metadata"]))
@@ -134,7 +142,7 @@ def predict_preprocessed_3d(
             for x in starts[2]:
                 pd, ph, pw = patch_shape
                 patch = volume[:, z:z + pd, y:y + ph, x:x + pw][None].to(device)
-                with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=amp and device.type == "cuda"):
+                with torch.autocast(device_type=device.type, dtype=torch_amp_dtype, enabled=amp and device.type == "cuda"):
                     output = model(patch).softmax(dim=1)[0].float().cpu().numpy()
                 probabilities[:, z:z + pd, y:y + ph, x:x + pw] += output * gaussian
                 weights[z:z + pd, y:y + ph, x:x + pw] += gaussian

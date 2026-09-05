@@ -210,11 +210,12 @@ def validate_volumes(
     batch_size: int,
     device: torch.device,
     amp: bool,
+    amp_dtype: str = "float16",
 ) -> dict[str, Any]:
     per_subject = []
     for path in paths:
         probabilities, metadata = predict_preprocessed(
-            model, path, planes=planes, batch_size=batch_size, device=device, amp=amp
+            model, path, planes=planes, batch_size=batch_size, device=device, amp=amp, amp_dtype=amp_dtype
         )
         with np.load(path, allow_pickle=False) as archive:
             target = archive["label"]
@@ -232,6 +233,7 @@ def validate_volumes_3d(
     patch_size: int | tuple[int, int, int],
     device: torch.device,
     amp: bool,
+    amp_dtype: str = "float16",
 ) -> dict[str, Any]:
     per_subject = []
     for path in paths:
@@ -241,6 +243,7 @@ def validate_volumes_3d(
             patch_size=patch_size,
             device=device,
             amp=amp,
+            amp_dtype=amp_dtype,
         )
         with np.load(path, allow_pickle=False) as archive:
             target = archive["label"]
@@ -270,6 +273,10 @@ def train_fold(
         device_name = "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(device_name)
     amp = bool(training.get("amp", True)) and device.type == "cuda"
+    amp_dtype_name = str(training.get("amp_dtype", "float16"))
+    if amp_dtype_name not in {"float16", "bfloat16"}:
+        raise ValueError("amp_dtype doit valoir 'float16' ou 'bfloat16'")
+    amp_dtype = torch.float16 if amp_dtype_name == "float16" else torch.bfloat16
     if device.type == "cuda":
         torch.backends.cudnn.benchmark = bool(training.get("cudnn_benchmark", False))
 
@@ -350,7 +357,10 @@ def train_fold(
     scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer, lambda step: cosine_lambda(step, total_steps, warmup_steps)
     )
-    scaler = torch.amp.GradScaler("cuda", enabled=amp)
+    # Le loss scaling ne concerne que le fp16 (le bf16 a la même plage d'exposant que le
+    # fp32 et n'a pas besoin d'être compensé) ; l'activer quand même sur ROCm masquerait
+    # une éventuelle instabilité au lieu de la corriger.
+    scaler = torch.amp.GradScaler("cuda", enabled=amp and amp_dtype_name == "float16")
     ema = ModelEMA(model, float(training["ema_decay"]))
 
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -408,7 +418,7 @@ def train_fold(
             if plane is not None:
                 plane = plane.to(device, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
-            with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=amp):
+            with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp):
                 logits = model(image) if architecture == "unet_3d_21d" else model(image, plane)
                 losses = criterion(logits, target, valid)
             scaler.scale(losses["loss"]).backward()
@@ -470,6 +480,7 @@ def train_fold(
                     batch_size=int(config["validation"]["batch_size"]),
                     device=device,
                     amp=amp,
+                    amp_dtype=amp_dtype_name,
                 )
                 record["val_axial"] = axial
                 print(_validation_summary("axial", epoch + 1, axial), flush=True)
@@ -477,7 +488,12 @@ def train_fold(
                 previous_best = best_dice
                 if is_3d:
                     triplane = validate_volumes_3d(
-                        ema_model, val_paths, patch_size=config["patch3d"]["patch_size"], device=device, amp=amp
+                        ema_model,
+                        val_paths,
+                        patch_size=config["patch3d"]["patch_size"],
+                        device=device,
+                        amp=amp,
+                        amp_dtype=amp_dtype_name,
                     )
                 else:
                     triplane = validate_volumes(
@@ -487,6 +503,7 @@ def train_fold(
                         batch_size=int(config["validation"]["batch_size"]),
                         device=device,
                         amp=amp,
+                        amp_dtype=amp_dtype_name,
                     )
                 record["val_triplane"] = triplane
                 print(

@@ -103,6 +103,8 @@ def command_train(args: argparse.Namespace) -> None:
     config = load_config(args.config)
     if args.epochs is not None:
         config["training"]["epochs"] = args.epochs
+    if args.amp_dtype is not None:
+        config["training"]["amp_dtype"] = args.amp_dtype
     fold = args.fold if args.fold == "all" else int(args.fold)
     run = train_fold(
         config,
@@ -162,6 +164,7 @@ def command_predict(args: argparse.Namespace) -> None:
             patch_size=config["patch3d"]["patch_size"],
             device=device,
             amp=not args.no_amp,
+            amp_dtype=args.amp_dtype,
         )
     else:
         planes = (
@@ -177,6 +180,7 @@ def command_predict(args: argparse.Namespace) -> None:
             batch_size=args.batch_size,
             device=device,
             amp=not args.no_amp,
+            amp_dtype=args.amp_dtype,
         )
     output = restore_prediction(
         probabilities.argmax(axis=0).astype(np.uint8),
@@ -369,6 +373,11 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--resume", type=Path)
     train.add_argument("--smoke", action="store_true")
     train.add_argument("--device", default="auto")
+    train.add_argument(
+        "--amp-dtype",
+        choices=["float16", "bfloat16"],
+        help="type d'autocast (défaut: float16 ; bfloat16 recommandé sur certains GPU ROCm, où float16+GradScaler peut diverger en NaN)",
+    )
     train.set_defaults(function=command_train)
 
     export = subparsers.add_parser("export", help="exporte les poids EMA fusionnés")
@@ -394,6 +403,12 @@ def build_parser() -> argparse.ArgumentParser:
     predict.add_argument("--batch-size", type=int, default=16)
     predict.add_argument("--device", default="auto")
     predict.add_argument("--no-amp", action="store_true")
+    predict.add_argument(
+        "--amp-dtype",
+        choices=["float16", "bfloat16"],
+        default="float16",
+        help="type d'autocast (bfloat16 recommandé sur certains GPU ROCm)",
+    )
     predict.add_argument("--contiguous-labels", action="store_true")
     predict.set_defaults(function=command_predict)
 
