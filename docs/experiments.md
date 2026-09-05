@@ -77,6 +77,34 @@ Le multi-plan est déterminant, mais la troisième vue axiale n'ajoute que
 `+0,00033` face à coronal+sagittal. `d=2` n'est pas un TTA rentable. Le rapport
 complet est dans [tta_ablation.md](tta_ablation.md).
 
+## Ablation des canaux de coordonnées
+
+Le pipeline de référence ajoute déjà trois canaux de coordonnées RAS normalisées
+(`coord_x/y/z`, type CoordConv) et un `brain_mask` à T1/T2, soit 6 canaux au total. Cet
+apport n'avait jamais été mesuré isolément. La config `d0_axial_coords.toml` (axial
+seul, FiLM désactivé, pour ne pas confondre l'apport des coordonnées avec celui du
+tri-plan/FiLM) existait déjà mais n'avait jamais été exécutée; `d0prime_no_coords.toml`
+a été ajoutée comme config sœur strictement identique sauf `in_channels=3` /
+`input_indices=[0,1,5]` (T1, T2, `brain_mask`, coordonnées exclues).
+
+Exécutée sur une machine ROCm, ce qui a révélé et fait corriger deux bugs préexistants
+d'autocast fp16 codé en dur (entraînement puis validation), instable sur ce GPU —
+détails dans [coord_channel_ablation.md](coord_channel_ablation.md). Seule l'epoch 35
+est comparable pour D0 (epochs antérieures invalidées par le bug de validation avant
+correctif) ; D0′ est fiable sur toute sa trajectoire.
+
+| ID | Canaux | Dice e35 | CSF | GM | WM | Décision |
+|---|---|---:|---:|---:|---:|---|
+| D0  | 6 (avec coords) | 0,903407 | 0,938244 | 0,897093 | 0,874884 | référence |
+| D0′ | 3 (sans coords) | 0,887936 | 0,938665 | 0,886426 | 0,838717 | rejeté : −0,015471 |
+
+Les coordonnées apportent un gain de `+0,015471` en moyenne (jusqu'à `+0,036166` sur
+WM), cohérent sur les deux sujets de validation et très au-dessus du seuil d'ambiguïté
+de 0,002. Les 6 canaux restent le défaut de `rep_slicemix.toml`.
+
+Détails, commandes et critère de décision dans
+[coord_channel_ablation.md](coord_channel_ablation.md).
+
 ## Optimisations de vitesse
 
 La boucle retenue combine six workers persistants, AdamW fusionné, EMA
@@ -150,6 +178,7 @@ brainviz-repslice train --config configs/experiments/b5_d1_only.toml \
 - [architecture_ablation_round1.md](architecture_ablation_round1.md) : B1–B3.
 - [architecture_ablation_round2.md](architecture_ablation_round2.md) : B4.
 - [sampling_ablation_d1.md](sampling_ablation_d1.md) : B5.
+- [coord_channel_ablation.md](coord_channel_ablation.md) : apport des canaux de coordonnées (D0/D0′).
 - [tta_ablation.md](tta_ablation.md) : plans et espacements.
 - [training_performance.md](training_performance.md) : vitesse d'entraînement.
 - [model_card_rep_slicemix.md](model_card_rep_slicemix.md) : modèle retenu.

@@ -83,6 +83,25 @@ def test_invalid_model_input_is_rejected():
         model(torch.randn(1, 6, 3, 64, 64), torch.zeros(1, dtype=torch.long))
 
 
+def test_input_indices_ignores_excluded_channels():
+    """Verrouille le slicing de forward() avant l'ablation D0/D0' (coords)."""
+    torch.manual_seed(0)
+    model = TriPlaneRepSliceMixNet(in_channels=3, input_indices=(0, 1, 5)).eval()
+    plane = torch.zeros(2, dtype=torch.long)
+    x = torch.randn(2, 6, 5, 64, 80)
+    with torch.no_grad():
+        baseline = model(x, plane)
+        perturbed = x.clone()
+        perturbed[:, [2, 3, 4]] = torch.randn_like(perturbed[:, [2, 3, 4]])
+        actual = model(perturbed, plane)
+    assert torch.equal(baseline, actual)
+
+
+def test_input_indices_length_mismatch_is_rejected():
+    with pytest.raises(ValueError):
+        TriPlaneRepSliceMixNet(in_channels=3, input_indices=(0, 1))
+
+
 def test_3d_competitor_shape_and_capacity():
     model = UNet3D21D(widths=(32, 64, 128, 256)).eval()
     with torch.no_grad():

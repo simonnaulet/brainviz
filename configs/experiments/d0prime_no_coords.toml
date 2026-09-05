@@ -2,8 +2,8 @@ extends = "../rep_slicemix.toml"
 
 [model]
 architecture = "rep_slicemix"
-in_channels = 6
-input_indices = [0, 1, 2, 3, 4, 5]
+in_channels = 3
+input_indices = [0, 1, 5]
 multi_branch = true
 film = false
 
@@ -11,4 +11,4 @@ film = false
 planes = [0]
 
 [training]
-output_dir = "artifacts/rep_slicemix/ablations/d0_axial_coords"
+output_dir = "artifacts/rep_slicemix/ablations/d0prime_no_coords"
